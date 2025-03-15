@@ -1,9 +1,7 @@
-version: '3'
-
 services:
   server-bot:
     container_name: server-bot
-    image: allenrkeen/server-bot:latest
+    image: hhftechnology/pangolin-discord-bot:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock #required
     environment:

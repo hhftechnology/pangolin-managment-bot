@@ -1,14 +1,14 @@
 {
-  "name": "server-bot",
+  "name": "pangolin-discord-bot",
   "version": "1.0.0",
-  "description": "Discord bot to remotely monitor and control a docker based server",
+  "description": "Discord bot to remotely monitor and control your pangolin stack on a vps server",
   "main": "index.js",
   "scripts": {
     "start": "nodemon index.js"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/allenrkeen/server-bot.git"
+    "url": "git+https://github.com/hhftechnology/pangolin-discord-bot.git"
   },
   "keywords": [
     "discord",
@@ -16,12 +16,12 @@
     "linux",
     "selfhost"
   ],
-  "author": "allenrkeen",
+  "author": "hhftechnology",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/allenrkeen/server-bot/issues"
+    "url": "hhttps://github.com/hhftechnology/pangolin-discord-bot/issues"
   },
-  "homepage": "https://github.com/allenrkeen/server-bot#readme",
+  "homepage": "https://github.com/hhftechnology/pangolin-discord-bot#readme",
   "dependencies": {
     "discord.js": "^14.7.1",
     "dotenv": "^16.0.3",
