@@ -1,35 +1,100 @@
-name: Docker Image CI
+name: Build, Tag and Publish Docker Images
 
-# Trigger the workflow on push to main branch and when manually triggered
 on:
+  # Trigger on pushes to specific branches
   push:
-    branches: [ "main" ]
-    # Only trigger on changes to relevant files
+    branches: [ "main", "dev", "test" ]
     paths:
       - 'Dockerfile'
       - 'backend/**'
       - 'commands/**'
       - '.github/workflows/**'
-  workflow_dispatch:  # Allows manual triggering
+      - 'package.json'
+  
+  # Manual trigger with version tagging options
+  workflow_dispatch:
+    inputs:
+      create_tag:
+        description: 'Create a Git tag for this version?'
+        type: boolean
+        default: false
+      branch:
+        description: 'Branch to create tag on'
+        required: true
+        default: 'main'
 
-# Environment variables used across jobs
 env:
-  # Change these to match your image names
   DOCKERHUB_IMAGE_NAME: hhftechnology/pangolin-discord-bot
   GITHUB_IMAGE_NAME: ${{ github.repository_owner }}/pangolin-discord-bot
-  
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # Add permissions needed for GitHub Packages
     permissions:
-      contents: read
-      packages: write
+      contents: write  # Needed for tag creation
+      packages: write  # Needed for GitHub Packages
     
     steps:
       # Checkout the repository
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for tag operations
+      
+      # Extract version from package.json without modifying it
+      - name: Extract Version
+        id: extract_version
+        run: |
+          # Check if package.json exists
+          if [ -f "package.json" ]; then
+            # Extract version using grep and cut
+            VERSION=$(grep -o '"version": *"[^"]*"' package.json | cut -d'"' -f4)
+            echo "Found version: $VERSION"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "has_package_json=true" >> $GITHUB_OUTPUT
+          else
+            echo "No package.json found"
+            echo "has_package_json=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # Determine branch name for tagging
+      - name: Get branch name
+        id: branch_name
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            BRANCH="${{ github.event.inputs.branch }}"
+          else
+            BRANCH="${GITHUB_REF#refs/heads/}"
+          fi
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+      
+      # Create Git tag if requested (manual workflow) or on version change (main branch)
+      - name: Create Git tag
+        id: create_tag
+        if: |
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_tag == 'true') ||
+          (github.event_name == 'push' && steps.branch_name.outputs.branch == 'main' && 
+           steps.extract_version.outputs.has_package_json == 'true' && 
+           contains(github.event.head_commit.modified, 'package.json'))
+        run: |
+          # Configure Git
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          
+          # Create tag using the extracted version
+          TAG_NAME="v${{ steps.extract_version.outputs.version }}"
+          
+          # Check if tag already exists
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME already exists. Skipping tag creation."
+            echo "new_tag=false" >> $GITHUB_OUTPUT
+          else
+            git tag $TAG_NAME
+            git push origin $TAG_NAME
+            echo "Created new tag: $TAG_NAME"
+            echo "new_tag=true" >> $GITHUB_OUTPUT
+            echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          fi
       
       # Set up QEMU for multi-platform builds
       - name: Set up QEMU
@@ -59,24 +124,50 @@ jobs:
         id: date
         run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
       
-      # Build and push Docker image
+      # Prepare tags based on branch and version
+      - name: Prepare Docker tags
+        id: docker_tags
+        run: |
+          TAGS=""
+          BRANCH="${{ steps.branch_name.outputs.branch }}"
+          
+          # Add branch-specific tags
+          if [ "$BRANCH" == "main" ]; then
+            # For main branch, add latest tag
+            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:latest,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:latest"
+            
+            # Add version tag if package.json exists
+            if [ "${{ steps.extract_version.outputs.has_package_json }}" == "true" ]; then
+              TAGS="$TAGS,${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.extract_version.outputs.version }},ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ steps.extract_version.outputs.version }}"
+            fi
+          elif [ "$BRANCH" == "dev" ] || [ "$BRANCH" == "test" ]; then
+            # For dev/test branches
+            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:$BRANCH,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:$BRANCH"
+          else
+            # For other branches
+            CLEAN_BRANCH=$(echo "$BRANCH" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:$CLEAN_BRANCH,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:$CLEAN_BRANCH"
+          fi
+          
+          # Always add date-based tag
+          TAGS="$TAGS,${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }},ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }}"
+          
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Docker tags: $TAGS"
+      
+      # Build and push Docker image - keeping your working configuration
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.DOCKERHUB_IMAGE_NAME }}:latest
-            ${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }}
-            ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:latest
-            ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }}
+          tags: ${{ steps.docker_tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Add build arguments if needed
           build-args: |
             BUILD_DATE=${{ steps.date.outputs.date }}
-            VERSION=${{ github.sha }}
+            VERSION=${{ steps.extract_version.outputs.version || github.sha }}
       
       # Sync README to DockerHub
       - name: Sync README to DockerHub
@@ -94,5 +185,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.DOCKERHUB_IMAGE_NAME }}
-          short-description: "Pangolin Docker Bot"
+          short-description: "Pangolin Discord Bot"
           readme-filepath: ./README.md
