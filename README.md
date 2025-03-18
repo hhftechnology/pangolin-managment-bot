@@ -35,8 +35,8 @@ The bot is built with Node.js and uses:
 
 ### Setup Instructions
 
-1. Clone this repository:
-   ```yml
+1. Clone this composefile:
+```yml
 services:
   server-bot:
     container_name: server-bot
