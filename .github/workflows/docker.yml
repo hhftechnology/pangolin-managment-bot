@@ -1,233 +1,85 @@
-name: Build, Tag and Publish
+name: Docker Image CI
 
+# Trigger the workflow on push to main branch and when manually triggered
 on:
-  # Trigger on pushes to specific branches
   push:
-    branches: [ "main", "dev", "test" ]
+    branches: [ "main" ]
+    # Only trigger on changes to relevant files
     paths:
       - 'Dockerfile'
       - 'backend/**'
       - 'commands/**'
       - '.github/workflows/**'
-      - 'package.json'
-  
-  # Trigger on manual dispatch with version increment options
-  workflow_dispatch:
-    inputs:
-      version_increment:
-        description: 'Version increment type'
-        required: true
-        default: 'patch'
-        type: choice
-        options:
-          - patch  # 1.0.0 -> 1.0.1
-          - minor  # 1.0.0 -> 1.1.0
-          - major  # 1.0.0 -> 2.0.0
-      branch:
-        description: 'Branch to create tag on'
-        required: true
-        default: 'main'
-  
-  # Trigger on pull requests to main branch for testing
-  pull_request:
-    branches: [ "main" ]
-    types: [opened, synchronize]
+  workflow_dispatch:  # Allows manual triggering
 
+# Environment variables used across jobs
 env:
+  # Change these to match your image names
   DOCKERHUB_IMAGE_NAME: hhftechnology/pangolin-discord-bot
   GITHUB_IMAGE_NAME: ${{ github.repository_owner }}/pangolin-discord-bot
-
+  
 jobs:
-  # Versioning job - creates semantic version tags
-  versioning:
-    runs-on: ubuntu-latest
-    # Skip this job for pull requests and if pushed changes don't include package.json
-    if: |
-      github.event_name != 'pull_request' && 
-      (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.modified, 'package.json'))
-    outputs:
-      new_version: ${{ steps.bump-version.outputs.new_version }}
-      new_tag: ${{ steps.create-tag.outputs.new_tag }}
-      branch_name: ${{ steps.get-branch.outputs.branch_name }}
-    
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Needed for git operations
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-      
-      - name: Get current branch
-        id: get-branch
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "branch_name=${{ github.event.inputs.branch }}" >> $GITHUB_OUTPUT
-          else
-            echo "branch_name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Configure Git
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          
-      # Only run version bumping on main branch or manual dispatch 
-      - name: Bump version and create tag
-        id: bump-version
-        if: steps.get-branch.outputs.branch_name == 'main' || github.event_name == 'workflow_dispatch'
-        run: |
-          # Get current version from package.json
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "Current version: $CURRENT_VERSION"
-          
-          # Determine version increment type
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            INCREMENT_TYPE="${{ github.event.inputs.version_increment }}"
-          else
-            # Default to patch for automatic updates on main
-            INCREMENT_TYPE="patch"
-          fi
-          
-          # Bump version in package.json
-          npm version $INCREMENT_TYPE --no-git-tag-version
-          
-          # Get the new version
-          NEW_VERSION=$(node -p "require('./package.json').version")
-          echo "New version: $NEW_VERSION"
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          
-          # Commit the version bump
-          git add package.json
-          git commit -m "Bump version to $NEW_VERSION [skip ci]"
-          
-          # Push changes back to the repo
-          git push origin HEAD:${{ steps.get-branch.outputs.branch_name }}
-      
-      - name: Create Tag
-        id: create-tag
-        if: steps.bump-version.outputs.new_version != ''
-        run: |
-          NEW_VERSION="${{ steps.bump-version.outputs.new_version }}"
-          TAG_NAME="v$NEW_VERSION"
-          
-          # Check if tag already exists
-          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-            echo "Tag $TAG_NAME already exists. Skipping tag creation."
-          else
-            git tag $TAG_NAME
-            git push origin $TAG_NAME
-            echo "Created new tag: $TAG_NAME"
-          fi
-          
-          echo "new_tag=$TAG_NAME" >> $GITHUB_OUTPUT
-
-  # Docker build and push job
   build-and-push:
-    needs: [versioning]
     runs-on: ubuntu-latest
-    # Always run this job, even if versioning is skipped
-    if: always() && (needs.versioning.result == 'success' || needs.versioning.result == 'skipped')
+    # Add permissions needed for GitHub Packages
     permissions:
       contents: read
       packages: write
     
     steps:
+      # Checkout the repository
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
-
+      
+      # Set up QEMU for multi-platform builds
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       
+      # Set up Docker Buildx
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
+      # Login to DockerHub
       - name: Login to DockerHub
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       
+      # Login to GitHub Container Registry
       - name: Login to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
+      # Get current date for image tags
       - name: Get current date
         id: date
         run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
       
-      - name: Set branch name
-        id: branch
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            echo "name=${{ github.head_ref }}" >> $GITHUB_OUTPUT
-          else
-            echo "name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Prepare tags
-        id: prepare-tags
-        run: |
-          # Base tags that are always included
-          TAGS=""
-          
-          # Branch-specific logic
-          if [ "${{ steps.branch.outputs.name }}" == "main" ]; then
-            # For main branch
-            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:latest,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:latest"
-            
-            # Add version tag if available from versioning job
-            if [ -n "${{ needs.versioning.outputs.new_version }}" ]; then
-              TAGS="$TAGS,${{ env.DOCKERHUB_IMAGE_NAME }}:${{ needs.versioning.outputs.new_version }},ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ needs.versioning.outputs.new_version }}"
-            fi
-            
-          elif [ "${{ steps.branch.outputs.name }}" == "dev" ]; then
-            # For dev branch
-            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:dev,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:dev"
-            
-          elif [ "${{ steps.branch.outputs.name }}" == "test" ]; then
-            # For test branch
-            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:test,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:test"
-            
-          else
-            # For other branches (PR or custom branch)
-            BRANCH_NAME="${{ steps.branch.outputs.name }}"
-            # Clean branch name for Docker tag (remove slashes, etc.)
-            CLEAN_BRANCH=$(echo "$BRANCH_NAME" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
-            TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:$CLEAN_BRANCH,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:$CLEAN_BRANCH"
-          fi
-          
-          # Always add date-based tag
-          TAGS="$TAGS,${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }},ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }}"
-          
-          # Set output
-          echo "tags=$TAGS" >> $GITHUB_OUTPUT
-      
-      - name: Build Docker image
+      # Build and push Docker image
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.prepare-tags.outputs.tags }}
+          push: true
+          tags: |
+            ${{ env.DOCKERHUB_IMAGE_NAME }}:latest
+            ${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }}
+            ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:latest
+            ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ steps.date.outputs.date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # Add build arguments if needed
           build-args: |
             BUILD_DATE=${{ steps.date.outputs.date }}
-            VERSION=${{ needs.versioning.outputs.new_version || github.sha }}
+            VERSION=${{ github.sha }}
       
+      # Sync README to DockerHub
       - name: Sync README to DockerHub
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || needs.versioning.outputs.new_tag != '')
         uses: ms-jpq/sync-dockerhub-readme@v1
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -235,12 +87,12 @@ jobs:
           repository: ${{ env.DOCKERHUB_IMAGE_NAME }}
           readme: "./README.md"
       
+      # Update Docker Hub Description
       - name: Update Docker Hub Description
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || needs.versioning.outputs.new_tag != '')
         uses: peter-evans/dockerhub-description@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.DOCKERHUB_IMAGE_NAME }}
-          short-description: "Pangolin Discord Bot"
+          short-description: "Pangolin Docker Bot"
           readme-filepath: ./README.md
