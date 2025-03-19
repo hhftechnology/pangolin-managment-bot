@@ -3,7 +3,7 @@ name: Build, Tag and Publish Docker Images
 on:
   # Trigger on pushes to specific branches
   push:
-    branches: [ "main", "dev", "test" ]
+    branches: [ "main", "dev", "test", "crowdsec" ]
     paths:
       - 'Dockerfile'
       - 'backend/**'
@@ -140,8 +140,8 @@ jobs:
             if [ "${{ steps.extract_version.outputs.has_package_json }}" == "true" ]; then
               TAGS="$TAGS,${{ env.DOCKERHUB_IMAGE_NAME }}:${{ steps.extract_version.outputs.version }},ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:${{ steps.extract_version.outputs.version }}"
             fi
-          elif [ "$BRANCH" == "dev" ] || [ "$BRANCH" == "test" ]; then
-            # For dev/test branches
+          elif [ "$BRANCH" == "dev" ] || [ "$BRANCH" == "test" ] || [ "$BRANCH" == "crowdsec" ]; then
+            # For dev/test/crowdsec branches
             TAGS="$TAGS ${{ env.DOCKERHUB_IMAGE_NAME }}:$BRANCH,ghcr.io/${{ env.GITHUB_IMAGE_NAME }}:$BRANCH"
           else
             # For other branches
