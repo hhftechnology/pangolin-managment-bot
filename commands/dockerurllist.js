@@ -1,5 +1,6 @@
 // commands/dockerurllist.js
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
+const Docker = require('node-docker-api').Docker;
 const fs = require('fs').promises;
 const path = require('path');
 const branding = require('../backend/pangolinBranding');
@@ -31,7 +32,11 @@ module.exports = {
         .addStringOption(option =>
           option.setName('container')
             .setDescription('Container name to remove')
-            .setRequired(true))),
+            .setRequired(true)))
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('import')
+        .setDescription('Import default URL list for common containers')),
   
   async execute(interaction) {
     await interaction.deferReply();
@@ -42,9 +47,18 @@ module.exports = {
       // Create embed with branding
       const embed = branding.getHeaderEmbed('Docker URL List', 'info');
       
-      // Path to the urls.list file
-      const scriptDir = process.cwd();
-      const urlListFile = path.join(scriptDir, 'urls.list');
+      // Path to the urls.list file in the data directory
+      const dataDir = path.join(process.cwd(), 'data');
+      const urlListFile = path.join(dataDir, 'urls.list');
+      
+      // Ensure data directory exists
+      try {
+        await fs.mkdir(dataDir, { recursive: true });
+      } catch (error) {
+        if (error.code !== 'EEXIST') {
+          throw error;
+        }
+      }
       
       // Function to read URL list
       async function getUrlList() {
@@ -100,7 +114,7 @@ module.exports = {
           embed.setDescription(`${branding.emojis.warning} No container URLs are currently configured.`);
           embed.addFields({
             name: 'Getting Started',
-            value: `Use \`/dockerurllist add\` to add URLs for container release notes or update information.`
+            value: `Use \`/dockerurllist add\` to add URLs for container release notes or update information.\nOr use \`/dockerurllist import\` to import a default list of common container URLs.`
           });
         } else {
           embed.setDescription(`${branding.emojis.healthy} The following container URLs are configured:`);
@@ -125,6 +139,26 @@ module.exports = {
           name: 'Purpose',
           value: `These URLs are used in update notifications to provide links to release notes or changelogs for each container.`
         });
+        
+        // Try to show list of running containers that don't have URLs configured
+        try {
+          const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+          const containers = await docker.container.list();
+          
+          const containerNames = containers.map(c => c.data.Names[0].slice(1));
+          const configuredContainers = urlList.map(entry => entry.container);
+          
+          const unconfiguredContainers = containerNames.filter(name => !configuredContainers.includes(name));
+          
+          if (unconfiguredContainers.length > 0) {
+            embed.addFields({
+              name: 'Running Containers Without URL Configuration',
+              value: unconfiguredContainers.map(name => `${branding.emojis.warning} ${name}`).join('\n')
+            });
+          }
+        } catch (error) {
+          console.error("Error listing Docker containers:", error);
+        }
       } else if (subcommand === 'add') {
         const container = interaction.options.getString('container');
         const url = interaction.options.getString('url');
@@ -160,6 +194,23 @@ module.exports = {
           embed.setDescription(`${branding.emojis.healthy} URL for container "${container}" added successfully.`);
           embed.addFields({ name: 'URL', value: url });
         }
+        
+        // Check if container exists in Docker
+        try {
+          const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+          const containers = await docker.container.list({ all: true });
+          
+          const containerExists = containers.some(c => c.data.Names[0].slice(1) === container);
+          
+          if (!containerExists) {
+            embed.addFields({
+              name: '⚠️ Warning',
+              value: `No container named "${container}" was found in Docker. The URL has been saved, but may not be used unless a container with this name is created.`
+            });
+          }
+        } catch (error) {
+          console.error("Error checking Docker container:", error);
+        }
       } else if (subcommand === 'remove') {
         const container = interaction.options.getString('container');
         
@@ -184,6 +235,66 @@ module.exports = {
         } else {
           embed.setColor(branding.colors.warning);
           embed.setDescription(`${branding.emojis.warning} No URL found for container "${container}".`);
+        }
+      } else if (subcommand === 'import') {
+        embed.setDescription(`${branding.emojis.loading} Importing default URL list...`);
+        await interaction.editReply({ embeds: [embed] });
+        
+        // Default URL list for common containers
+        const defaultUrls = [
+          { container: "traefik", url: "https://github.com/traefik/traefik/releases" },
+          { container: "portainer", url: "https://github.com/portainer/portainer/releases" },
+          { container: "watchtower", url: "https://github.com/containrrr/watchtower/releases" },
+          { container: "nginx", url: "https://github.com/docker-library/official-images/blob/master/library/nginx" },
+          { container: "home-assistant", url: "https://github.com/home-assistant/docker/releases" },
+          { container: "cloudflared", url: "https://github.com/cloudflare/cloudflared/releases" },
+          { container: "sonarr", url: "https://github.com/linuxserver/docker-sonarr/releases" },
+          { container: "radarr", url: "https://github.com/linuxserver/docker-radarr/releases" },
+          { container: "lidarr", url: "https://github.com/linuxserver/docker-lidarr/releases" },
+          { container: "prowlarr", url: "https://github.com/Prowlarr/Prowlarr/releases" },
+          { container: "jellyfin", url: "https://github.com/jellyfin/jellyfin/releases" },
+          { container: "plex", url: "https://github.com/plexinc/pms-docker/releases" },
+          { container: "nextcloud", url: "https://github.com/nextcloud/docker/releases" },
+          { container: "vaultwarden", url: "https://github.com/dani-garcia/vaultwarden/releases" },
+          { container: "pihole", url: "https://github.com/pi-hole/docker-pi-hole/releases" },
+          { container: "adguard-home", url: "https://github.com/AdguardTeam/AdGuardHome/releases" },
+          { container: "unifi-controller", url: "https://github.com/linuxserver/docker-unifi-controller/releases" },
+          { container: "homer", url: "https://github.com/bastienwirtz/homer/releases" },
+          { container: "dashy", url: "https://github.com/Lissy93/dashy/releases" },
+          { container: "gotify", url: "https://github.com/gotify/server/releases" },
+          { container: "crowdsec", url: "https://github.com/crowdsecurity/crowdsec/releases" }
+        ];
+        
+        // Get current URL list
+        const currentUrls = await getUrlList();
+        
+        // Merge lists, prioritizing existing entries
+        const currentContainers = currentUrls.map(entry => entry.container);
+        const newUrls = defaultUrls.filter(entry => !currentContainers.includes(entry.container));
+        const mergedList = [...currentUrls, ...newUrls];
+        
+        // Save the merged list
+        await saveUrlList(mergedList);
+        
+        embed.setColor(branding.colors.success);
+        embed.setDescription(`${branding.emojis.healthy} Successfully imported default URL list.`);
+        embed.addFields(
+          { name: 'Existing URLs', value: `${currentUrls.length} (preserved)` },
+          { name: 'New URLs Added', value: `${newUrls.length}` },
+          { name: 'Total URLs', value: `${mergedList.length}` }
+        );
+        
+        if (newUrls.length > 0) {
+          let newUrlsList = '';
+          newUrls.forEach(entry => {
+            newUrlsList += `**${entry.container}**: ${entry.url}\n`;
+            if (newUrlsList.length > 900) {
+              newUrlsList += '... and more';
+              return;
+            }
+          });
+          
+          embed.addFields({ name: 'Newly Added URLs', value: newUrlsList });
         }
       }
       

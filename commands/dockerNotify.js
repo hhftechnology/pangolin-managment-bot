@@ -12,35 +12,31 @@ const execPromise = util.promisify(exec);
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("dockernotify")
-    .setDescription("Configure Docker update notifications")
+    .setDescription("Configure Discord notifications for Docker container updates")
     .addSubcommand(subcommand =>
       subcommand
         .setName('setup')
-        .setDescription('Set up notifications for Docker container updates')
+        .setDescription('Set up Discord notifications for container updates')
         .addStringOption(option =>
-          option.setName('type')
-            .setDescription('Notification type')
-            .setRequired(true)
-            .addChoices(
-              { name: 'Discord', value: 'discord' },
-              { name: 'Email (SMTP)', value: 'smtp' },
-              { name: 'Telegram', value: 'telegram' },
-              { name: 'Matrix', value: 'matrix' },
-              { name: 'Pushbullet', value: 'pushbullet' },
-              { name: 'Pushover', value: 'pushover' },
-              { name: 'Gotify', value: 'gotify' },
-              { name: 'Ntfy.sh', value: 'ntfy-sh' },
-              { name: 'Apprise', value: 'apprise' },
-              { name: 'Synology DSM', value: 'dsm' },
-            )))
+          option.setName('webhook_url')
+            .setDescription('Discord webhook URL')
+            .setRequired(true))
+        .addStringOption(option =>
+          option.setName('server_name')
+            .setDescription('Name of your server (shown in notifications)')
+            .setRequired(false)))
     .addSubcommand(subcommand =>
       subcommand
         .setName('status')
-        .setDescription('Check if notifications are configured'))
+        .setDescription('Check notification configuration status'))
     .addSubcommand(subcommand =>
       subcommand
         .setName('test')
-        .setDescription('Send a test notification')),
+        .setDescription('Send a test notification'))
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('disable')
+        .setDescription('Disable notifications')),
   
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true });
@@ -51,167 +47,198 @@ module.exports = {
       // Create embed with branding
       const embed = branding.getHeaderEmbed('Docker Notifications', 'info');
       
-      // Get the script directory
-      const scriptDir = process.cwd();
+      // Path to store notification configuration
+      const dataDir = path.join(process.cwd(), 'data');
+      const configFile = path.join(dataDir, 'notification_config.json');
+      
+      // Ensure data directory exists
+      try {
+        await fs.mkdir(dataDir, { recursive: true });
+      } catch (error) {
+        if (error.code !== 'EEXIST') {
+          throw error;
+        }
+      }
+      
+      // Function to read configuration
+      async function getConfig() {
+        try {
+          const data = await fs.readFile(configFile, 'utf8');
+          return JSON.parse(data);
+        } catch (error) {
+          if (error.code === 'ENOENT') {
+            return null;
+          }
+          throw error;
+        }
+      }
+      
+      // Function to save configuration
+      async function saveConfig(config) {
+        await fs.writeFile(configFile, JSON.stringify(config, null, 2));
+      }
       
       if (subcommand === 'setup') {
-        const notifyType = interaction.options.getString('type');
+        const webhookUrl = interaction.options.getString('webhook_url');
+        const serverName = interaction.options.getString('server_name') || 'Docker Server';
         
-        embed.setDescription(`${branding.emojis.loading} Setting up ${notifyType} notifications...`);
+        embed.setDescription(`${branding.emojis.loading} Setting up Discord notifications...`);
         await interaction.editReply({ embeds: [embed] });
         
-        // Template file path
-        const templateFile = path.join(scriptDir, 'notify_templates', `notify_${notifyType}.sh`);
-        const targetFile = path.join(scriptDir, 'notify.sh');
-        
-        // Check if template exists
-        try {
-          await fs.access(templateFile);
-        } catch (error) {
+        // Validate webhook URL
+        if (!webhookUrl.startsWith('https://discord.com/api/webhooks/')) {
           embed.setColor(branding.colors.danger);
-          embed.setDescription(`${branding.emojis.error} Notification template for ${notifyType} not found.`);
+          embed.setDescription(`${branding.emojis.error} Invalid Discord webhook URL.`);
           await interaction.editReply({ embeds: [embed] });
           return;
         }
         
-        // Copy the template
-        try {
-          await fs.copyFile(templateFile, targetFile);
-          
-          embed.setColor(branding.colors.success);
-          embed.setDescription(
-            `${branding.emojis.healthy} Successfully set up ${notifyType} notifications!\n\n` +
-            `You will need to customize the notify.sh file with your specific details.\n` +
-            `The file is located at: \`${targetFile}\``
-          );
-          
-          // Get the first few lines of the file to show what needs to be configured
-          const fileContent = await fs.readFile(templateFile, 'utf8');
-          const configLines = fileContent.split('\n')
-            .filter(line => line.includes('=') && !line.trim().startsWith('#'))
-            .slice(0, 5)
-            .map(line => line.trim());
-          
-          if (configLines.length > 0) {
-            embed.addFields({
-              name: 'Configuration Needed',
-              value: '```bash\n' + configLines.join('\n') + '\n```\nEdit these values in notify.sh'
-            });
-          }
-        } catch (error) {
-          embed.setColor(branding.colors.danger);
-          embed.setDescription(
-            `${branding.emojis.error} Error setting up notifications: ${error.message}\n` +
-            `Please manually copy ${templateFile} to ${targetFile}`
-          );
-        }
+        // Create configuration
+        const config = {
+          type: 'discord',
+          webhookUrl,
+          serverName,
+          enabled: true,
+          setupDate: new Date().toISOString()
+        };
+        
+        // Save configuration
+        await saveConfig(config);
+        
+        embed.setColor(branding.colors.success);
+        embed.setDescription(
+          `${branding.emojis.healthy} Successfully set up Discord notifications!\n\n` +
+          `Server Name: **${serverName}**\n` +
+          `Webhook: \`${webhookUrl.substring(0, 40)}...\``
+        );
+        
+        embed.addFields({
+          name: 'How It Works',
+          value: 'When you run `/dockercheck`, if updates are found, a notification will be sent to the configured Discord webhook.'
+        });
+        
+        await interaction.editReply({ embeds: [embed] });
       } else if (subcommand === 'status') {
         embed.setDescription(`${branding.emojis.loading} Checking notification configuration...`);
         await interaction.editReply({ embeds: [embed] });
         
-        const notifyFile = path.join(scriptDir, 'notify.sh');
+        const config = await getConfig();
         
-        try {
-          // Check if the file exists
-          await fs.access(notifyFile);
-          
-          // Try to determine what type of notification is configured
-          const fileContent = await fs.readFile(notifyFile, 'utf8');
-          
-          // Look for known signatures in the file
-          let notifyType = 'unknown';
-          if (fileContent.includes('NOTIFY_DISCORD_VERSION')) notifyType = 'Discord';
-          else if (fileContent.includes('NOTIFY_SMTP_VERSION')) notifyType = 'Email (SMTP)';
-          else if (fileContent.includes('NOTIFY_TELEGRAM_VERSION')) notifyType = 'Telegram';
-          else if (fileContent.includes('NOTIFY_MATRIX_VERSION')) notifyType = 'Matrix';
-          else if (fileContent.includes('NOTIFY_PUSHBULLET_VERSION')) notifyType = 'Pushbullet';
-          else if (fileContent.includes('NOTIFY_PUSHOVER_VERSION')) notifyType = 'Pushover';
-          else if (fileContent.includes('NOTIFY_GOTIFY_VERSION')) notifyType = 'Gotify';
-          else if (fileContent.includes('NOTIFY_NTFYSH_VERSION')) notifyType = 'Ntfy.sh';
-          else if (fileContent.includes('NOTIFY_APPRISE_VERSION')) notifyType = 'Apprise';
-          else if (fileContent.includes('NOTIFY_DSM_VERSION')) notifyType = 'Synology DSM';
-          
-          embed.setColor(branding.colors.success);
-          embed.setDescription(
-            `${branding.emojis.healthy} Notifications are configured!\n\n` +
-            `Type: **${notifyType}**\n` +
-            `File: \`${notifyFile}\``
-          );
-          
-          // Check if there's a dockcheck_notification function (for script updates)
-          if (fileContent.includes('dockcheck_notification()')) {
-            embed.addFields({
-              name: 'Script Update Notifications',
-              value: 'Configured to notify when dockcheck script updates are available.'
-            });
-          } else {
-            embed.addFields({
-              name: 'Script Update Notifications',
-              value: 'Not configured to notify when dockcheck script updates are available.'
-            });
-          }
-        } catch (error) {
+        if (!config || !config.enabled) {
           embed.setColor(branding.colors.warning);
           embed.setDescription(
-            `${branding.emojis.warning} Notifications are not configured.\n\n` +
+            `${branding.emojis.warning} Notifications are not configured or disabled.\n\n` +
             `Use \`/dockernotify setup\` to set up notifications.`
           );
+        } else {
+          embed.setColor(branding.colors.success);
+          embed.setDescription(
+            `${branding.emojis.healthy} Notifications are configured and enabled!`
+          );
+          
+          embed.addFields(
+            { name: 'Type', value: config.type.charAt(0).toUpperCase() + config.type.slice(1) },
+            { name: 'Server Name', value: config.serverName },
+            { name: 'Setup Date', value: new Date(config.setupDate).toLocaleString() }
+          );
+          
+          if (config.type === 'discord') {
+            embed.addFields({
+              name: 'Discord Webhook',
+              value: `\`${config.webhookUrl.substring(0, 40)}...\``
+            });
+          }
         }
+        
+        await interaction.editReply({ embeds: [embed] });
       } else if (subcommand === 'test') {
         embed.setDescription(`${branding.emojis.loading} Sending test notification...`);
         await interaction.editReply({ embeds: [embed] });
         
-        const notifyFile = path.join(scriptDir, 'notify.sh');
+        const config = await getConfig();
         
+        if (!config || !config.enabled) {
+          embed.setColor(branding.colors.danger);
+          embed.setDescription(
+            `${branding.emojis.error} Notifications are not configured or disabled.\n\n` +
+            `Use \`/dockernotify setup\` to set up notifications.`
+          );
+          await interaction.editReply({ embeds: [embed] });
+          return;
+        }
+        
+        // Send test notification
         try {
-          // Check if the file exists
-          await fs.access(notifyFile);
-          
-          // Create a simple script to call notify.sh with a test message
-          const testScriptContent = `#!/bin/bash
-source "${notifyFile}"
-Updates=("Test Container 1" "Test Container 2")
-send_notification "\${Updates[@]}"
-`;
-          const testScriptPath = path.join(scriptDir, 'test_notification.sh');
-          await fs.writeFile(testScriptPath, testScriptContent);
-          await fs.chmod(testScriptPath, 0o755);
-          
-          // Execute the test script
-          const { stdout, stderr } = await execPromise(testScriptPath);
-          
-          // Clean up the test script
-          await fs.unlink(testScriptPath);
-          
-          if (stderr && stderr.includes('Error')) {
-            embed.setColor(branding.colors.danger);
-            embed.setDescription(
-              `${branding.emojis.error} Error sending test notification:\n\`\`\`${stderr}\`\`\``
-            );
-          } else {
+          if (config.type === 'discord') {
+            const testContainers = ['test-container-1', 'test-container-2', 'test-container-3'];
+            
+            // Create Discord webhook payload
+            const payload = {
+              username: `${config.serverName} Updates`,
+              content: '🐋 **Docker Container Updates Available**',
+              embeds: [{
+                title: 'Test Notification',
+                description: 'This is a test notification from your Docker update bot.',
+                color: 0xFFA500, // Orange
+                fields: [{
+                  name: 'Containers with Updates',
+                  value: testContainers.map(c => `• ${c}`).join('\n')
+                }],
+                footer: {
+                  text: `From: ${config.serverName} • ${new Date().toLocaleString()}`
+                }
+              }]
+            };
+            
+            // Send the webhook
+            const curlCommand = `curl -H "Content-Type: application/json" -d '${JSON.stringify(payload)}' ${config.webhookUrl}`;
+            await execPromise(curlCommand);
+            
             embed.setColor(branding.colors.success);
             embed.setDescription(
               `${branding.emojis.healthy} Test notification sent successfully!\n\n` +
-              `Check your configured notification channel to see if it was received.`
+              `Check your Discord channel to see if it was received.`
             );
-            
-            if (stdout) {
-              embed.addFields({
-                name: 'Output',
-                value: '```\n' + stdout.substring(0, 1000) + '\n```'
-              });
-            }
+          } else {
+            embed.setColor(branding.colors.warning);
+            embed.setDescription(
+              `${branding.emojis.warning} Unsupported notification type: ${config.type}\n\n` +
+              `Only Discord notifications are fully supported in this version.`
+            );
           }
         } catch (error) {
           embed.setColor(branding.colors.danger);
           embed.setDescription(
-            `${branding.emojis.error} Error testing notifications: ${error.message}\n\n` +
-            `Make sure notifications are set up with \`/dockernotify setup\`.`
+            `${branding.emojis.error} Error sending test notification:\n\`\`\`${error.message}\`\`\``
           );
         }
+        
+        await interaction.editReply({ embeds: [embed] });
+      } else if (subcommand === 'disable') {
+        embed.setDescription(`${branding.emojis.loading} Disabling notifications...`);
+        await interaction.editReply({ embeds: [embed] });
+        
+        const config = await getConfig();
+        
+        if (!config || !config.enabled) {
+          embed.setColor(branding.colors.warning);
+          embed.setDescription(
+            `${branding.emojis.warning} Notifications are already disabled or not configured.`
+          );
+        } else {
+          // Disable notifications
+          config.enabled = false;
+          await saveConfig(config);
+          
+          embed.setColor(branding.colors.success);
+          embed.setDescription(
+            `${branding.emojis.healthy} Notifications have been disabled.\n\n` +
+            `You can re-enable them by running \`/dockernotify setup\` again.`
+          );
+        }
+        
+        await interaction.editReply({ embeds: [embed] });
       }
-      
-      await interaction.editReply({ embeds: [embed] });
     } catch (error) {
       console.error("Error executing dockernotify:", error);
       
@@ -226,3 +253,53 @@ send_notification "\${Updates[@]}"
     }
   }
 };
+
+// Function to send actual notifications - can be called from dockercheck command
+async function sendUpdateNotification(containers) {
+  try {
+    // Path to config file
+    const configFile = path.join(process.cwd(), 'data', 'notification_config.json');
+    
+    // Read config
+    const configData = await fs.readFile(configFile, 'utf8');
+    const config = JSON.parse(configData);
+    
+    if (!config || !config.enabled) {
+      console.log("Notifications are disabled or not configured.");
+      return false;
+    }
+    
+    if (config.type === 'discord') {
+      // Create Discord webhook payload
+      const payload = {
+        username: `${config.serverName} Updates`,
+        content: '🐋 **Docker Container Updates Available**',
+        embeds: [{
+          title: 'Container Updates',
+          description: 'The following containers have updates available:',
+          color: 0xFFA500, // Orange
+          fields: [{
+            name: 'Containers',
+            value: containers.map(c => `• ${c}`).join('\n')
+          }],
+          footer: {
+            text: `From: ${config.serverName} • ${new Date().toLocaleString()}`
+          }
+        }]
+      };
+      
+      // Send the webhook
+      const curlCommand = `curl -H "Content-Type: application/json" -d '${JSON.stringify(payload)}' ${config.webhookUrl}`;
+      await execPromise(curlCommand);
+      
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error("Error sending notification:", error);
+    return false;
+  }
+}
+
+module.exports.sendUpdateNotification = sendUpdateNotification; 

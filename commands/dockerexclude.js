@@ -1,13 +1,9 @@
 // commands/dockerexclude.js
 const { SlashCommandBuilder, EmbedBuilder } = require("discord.js");
-const { exec } = require('child_process');
-const util = require('util');
+const Docker = require('node-docker-api').Docker;
 const fs = require('fs').promises;
 const path = require('path');
 const branding = require('../backend/pangolinBranding');
-
-// Promisify exec
-const execPromise = util.promisify(exec);
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -48,11 +44,10 @@ module.exports = {
       const embed = branding.getHeaderEmbed('Docker Exclusions', 'info');
       
       // Path to store exclusions
-      const scriptDir = process.cwd();
-      const excludeFile = path.join(scriptDir, 'data', 'excluded_containers.txt');
+      const dataDir = path.join(process.cwd(), 'data');
+      const excludeFile = path.join(dataDir, 'excluded_containers.txt');
       
       // Ensure data directory exists
-      const dataDir = path.join(scriptDir, 'data');
       try {
         await fs.mkdir(dataDir, { recursive: true });
       } catch (error) {
@@ -99,6 +94,32 @@ module.exports = {
           name: 'Usage with dockercheck',
           value: `When using \`/dockercheck\`, these containers will automatically be excluded.\nYou can still override this with the exclude option.`
         });
+        
+        // Additionally, show all available containers for reference
+        try {
+          const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+          const allContainers = await docker.container.list({ all: true });
+          
+          if (allContainers.length > 0) {
+            const containerNames = allContainers.map(c => c.data.Names[0].slice(1)).sort();
+            let containerList = '';
+            
+            for (const container of containerNames) {
+              const isExcluded = exclusions.includes(container);
+              const emoji = isExcluded ? branding.emojis.warning : branding.emojis.healthy;
+              containerList += `${emoji} ${container}${isExcluded ? ' (excluded)' : ''}\n`;
+              
+              if (containerList.length > 900) {
+                containerList += `... and ${containerNames.length - containerNames.indexOf(container)} more`;
+                break;
+              }
+            }
+            
+            embed.addFields({ name: 'All Available Containers', value: containerList });
+          }
+        } catch (error) {
+          console.error("Error getting container list:", error);
+        }
       } else if (subcommand === 'add') {
         const containers = interaction.options.getString('containers');
         const containersArray = containers.split(',').map(c => c.trim()).filter(c => c);
@@ -135,6 +156,24 @@ module.exports = {
               value: alreadyExcluded.map(c => `${branding.emojis.warning} ${c}`).join('\n')
             });
           }
+        }
+        
+        // Verify if containers actually exist
+        try {
+          const docker = new Docker({ socketPath: '/var/run/docker.sock' });
+          const allContainers = await docker.container.list({ all: true });
+          const existingContainers = allContainers.map(c => c.data.Names[0].slice(1));
+          
+          const nonExistent = newlyAdded.filter(c => !existingContainers.includes(c));
+          
+          if (nonExistent.length > 0) {
+            embed.addFields({
+              name: '⚠️ Warning: Containers Not Found',
+              value: `The following excluded containers don't exist in Docker:\n${nonExistent.join(', ')}\n\nThey will still be excluded from checks.`
+            });
+          }
+        } catch (error) {
+          console.error("Error verifying containers:", error);
         }
       } else if (subcommand === 'remove') {
         const containers = interaction.options.getString('containers');
