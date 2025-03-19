@@ -16,7 +16,7 @@ module.exports = {
   },
   
   // CrowdSec logo thumbnail URL
-  thumbnailUrl: 'https://cdn.jsdelivr.net/gh/selfhst/icons/svg/crowdsec.svg', // Replace with your preferred CrowdSec logo
+  thumbnailUrl: 'https://cdn.jsdelivr.net/gh/selfhst/icons/png/crowdsec.png', // Replace with your preferred CrowdSec logo
   
   // Common emojis for status indicators
   emojis: {
