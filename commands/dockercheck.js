@@ -1,9 +1,14 @@
 // commands/dockerCheck.js
 const { SlashCommandBuilder } = require("discord.js");
 const Docker = require('node-docker-api').Docker;
+const { exec } = require('child_process');
+const util = require('util');
 const fs = require('fs').promises;
 const path = require('path');
 const branding = require('../backend/pangolinBranding');
+
+// Promisify exec
+const execPromise = util.promisify(exec);
 
 // Path for excluded containers list
 const EXCLUDE_FILE_PATH = path.join(__dirname, '../data/excluded_containers.txt');
@@ -30,6 +35,117 @@ async function loadExcludedContainers() {
   }
 }
 
+// Check if an image update is available
+async function checkImageUpdate(image) {
+  try {
+    if (!image || !image.includes(':')) {
+      // If no tag is specified, assume it's latest
+      return { needsUpdate: false, reason: "No specific tag" };
+    }
+    
+    // Parse image name and tag
+    const [imageName, currentTag] = image.split(':');
+    
+    // Skip 'latest' tagged images - they have special handling
+    if (currentTag === 'latest') {
+      // For latest tag, pull to see if there's an update
+      try {
+        await execPromise(`docker pull ${image} --quiet`);
+        // Check if we got an update by comparing the image ID before and after pull
+        const { stdout: imageId } = await execPromise(`docker inspect --format="{{.Id}}" ${image}`);
+        return { needsUpdate: false, reason: "Latest tag pulled", currentTag: "latest" };
+      } catch (error) {
+        return { needsUpdate: false, reason: "Error pulling latest", error: error.message };
+      }
+    }
+    
+    // For version tags, fetch available tags and compare
+    try {
+      // Extract registry and repository parts
+      let registry = '';
+      let repository = imageName;
+      
+      if (imageName.includes('/')) {
+        const parts = imageName.split('/');
+        // Check if first part might be a registry URL
+        if (parts[0].includes('.') || parts[0] === 'localhost') {
+          registry = parts[0];
+          repository = parts.slice(1).join('/');
+        }
+      }
+      
+      // For Docker Hub images
+      if (!registry) {
+        // Check available tags for the image
+        const { stdout } = await execPromise(`curl -s "https://hub.docker.com/v2/repositories/${imageName}/tags?page_size=100"`);
+        const data = JSON.parse(stdout);
+        
+        // Find latest version matching pattern (assuming semantic versioning)
+        if (data && data.results && data.results.length > 0) {
+          // Extract version components from current tag
+          const versionMatch = currentTag.match(/^v?(\d+)\.(\d+)\.(\d+)/);
+          if (versionMatch) {
+            const [, major, minor, patch] = versionMatch;
+            
+            // Try to find newer versions with same major/minor version
+            const newerVersions = data.results
+              .map(tagInfo => tagInfo.name)
+              .filter(tag => {
+                // Match tags with same pattern
+                const tagMatch = tag.match(/^v?(\d+)\.(\d+)\.(\d+)/);
+                if (!tagMatch) return false;
+                
+                // Compare version components
+                const [, tagMajor, tagMinor, tagPatch] = tagMatch;
+                
+                // For simplicity, only check for patch updates
+                return (
+                  parseInt(tagMajor) === parseInt(major) && 
+                  parseInt(tagMinor) === parseInt(minor) && 
+                  parseInt(tagPatch) > parseInt(patch)
+                );
+              });
+            
+            if (newerVersions.length > 0) {
+              // Sort versions to find latest
+              newerVersions.sort((a, b) => {
+                const aMatch = a.match(/^v?(\d+)\.(\d+)\.(\d+)/);
+                const bMatch = b.match(/^v?(\d+)\.(\d+)\.(\d+)/);
+                if (!aMatch || !bMatch) return 0;
+                
+                // Compare major, minor, patch
+                const [, aMajor, aMinor, aPatch] = aMatch;
+                const [, bMajor, bMinor, bPatch] = bMatch;
+                
+                if (parseInt(aMajor) !== parseInt(bMajor)) {
+                  return parseInt(bMajor) - parseInt(aMajor);
+                }
+                if (parseInt(aMinor) !== parseInt(bMinor)) {
+                  return parseInt(bMinor) - parseInt(aMinor);
+                }
+                return parseInt(bPatch) - parseInt(aPatch);
+              });
+              
+              return { 
+                needsUpdate: true, 
+                latestTag: newerVersions[0], 
+                currentTag,
+                reason: `Update available: ${currentTag} → ${newerVersions[0]}`
+              };
+            }
+          }
+        }
+      }
+      
+      return { needsUpdate: false, reason: "No newer version found", currentTag };
+    } catch (error) {
+      return { needsUpdate: false, reason: "Error checking version", error: error.message, currentTag };
+    }
+  } catch (error) {
+    return { needsUpdate: false, reason: "Error parsing image", error: error.message };
+  }
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("dockercheck")
@@ -41,6 +157,10 @@ module.exports = {
     .addBooleanOption(option =>
       option.setName('show_all')
       .setDescription('Show all containers, including those with no update available')
+      .setRequired(false))
+    .addBooleanOption(option =>
+      option.setName('pull_latest')
+      .setDescription('Pull latest images for containers with "latest" tag')
       .setRequired(false)),
       
   async execute(interaction) {
@@ -50,6 +170,7 @@ module.exports = {
       // Get command options
       const excludeCurrent = interaction.options.getBoolean('exclude_current') || false;
       const showAll = interaction.options.getBoolean('show_all') || false;
+      const pullLatest = interaction.options.getBoolean('pull_latest') || false;
       
       // Load excluded containers
       const excludedContainers = await loadExcludedContainers();
@@ -71,7 +192,8 @@ module.exports = {
       await interaction.editReply({ embeds: [embed] });
       
       // Format results
-      let successResults = [];
+      let updateResults = [];
+      let upToDateResults = [];
       let errorResults = [];
       let skippedResults = [];
       
@@ -93,19 +215,25 @@ module.exports = {
           const image = container.data.Image;
           const imageId = container.data.ImageID;
           
-          // Placeholder for future image check logic
-          // In a real implementation, we would check if updates are available by
-          // comparing local image digest with remote registry
+          // Check for image updates
+          const updateCheck = await checkImageUpdate(image);
           
-          // For this simplified version, we'll consider all containers up to date
-          const isUpToDate = true;
-          
-          if (isUpToDate && !showAll) {
-            // Only add to success results if showing all containers
-            continue;
+          if (updateCheck.needsUpdate) {
+            updateResults.push(`${branding.emojis.warning} ${containerName} - ${updateCheck.reason}`);
+          } else {
+            if (showAll) {
+              upToDateResults.push(`${branding.emojis.healthy} ${containerName} - Up to date (${updateCheck.currentTag || 'unknown'})`);
+            }
           }
           
-          successResults.push(`${branding.emojis.healthy} ${containerName} - Up to date`);
+          // Pull latest image if requested and tag is latest
+          if (pullLatest && image.endsWith(':latest')) {
+            try {
+              await execPromise(`docker pull ${image} --quiet`);
+            } catch (pullError) {
+              console.error(`Error pulling ${image}:`, pullError.message);
+            }
+          }
         } catch (error) {
           console.error(`Error checking container ${container.data.Names[0]}:`, error);
           
@@ -131,8 +259,8 @@ module.exports = {
         }
       }
       
-      // Update header emoji if there are errors
-      if (errorResults.length > 0) {
+      // Update header emoji if there are errors or updates
+      if (errorResults.length > 0 || updateResults.length > 0) {
         headerEmoji = branding.emojis.warning;
         embed.setColor(branding.colors.warning);
       } else {
@@ -140,21 +268,29 @@ module.exports = {
       }
       
       // Update embed with results
-      const containerCount = successResults.length + errorResults.length + skippedResults.length;
+      const containerCount = updateResults.length + upToDateResults.length + errorResults.length + skippedResults.length;
       
       embed.setDescription(
         `${headerEmoji} **Docker Container Update Check Completed!**\n\n` +
         `Checked ${containerCount} containers\n` +
-        `✅ ${successResults.length} up to date\n` +
+        `✅ ${upToDateResults.length} up to date\n` +
+        `⚠️ ${updateResults.length} need updates\n` +
         `❌ ${errorResults.length} with errors\n` +
         `⚠️ ${skippedResults.length} excluded`
       );
       
       // Add fields for each category
-      if (successResults.length > 0) {
+      if (updateResults.length > 0) {
+        embed.addFields({
+          name: '⚠️ Containers Needing Updates',
+          value: updateResults.join('\n')
+        });
+      }
+      
+      if (upToDateResults.length > 0) {
         embed.addFields({
           name: '✅ Containers with No Updates',
-          value: successResults.join('\n')
+          value: upToDateResults.join('\n')
         });
       }
       
