@@ -12,8 +12,6 @@ module.exports = {
       // Create embed with branding
       const embed = branding.getHeaderEmbed('CrowdSec Discord Commands Help', 'crowdsec');
       
-      // Add CrowdSec logo as thumbnail
-      embed.setThumbnail('https://cdn.jsdelivr.net/gh/alohe/avatars/png/vibrent_21.png');
       
       // Create descriptions for each command
       const commandDescriptions = [
