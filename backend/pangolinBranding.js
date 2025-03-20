@@ -14,6 +14,9 @@ module.exports = {
       info: 0x3498DB,         // Blue (for informational displays)
       crowdsec: 0x5865F2      // CrowdSec's blue color
     },
+
+      // CrowdSec logo thumbnail URL
+    thumbnailUrl: 'https://cdn.jsdelivr.net/gh/selfhst/icons/png/pangolin-light.png', // Replace with your preferred CrowdSec logo
     
     // Common emojis for status indicators
     emojis: {
