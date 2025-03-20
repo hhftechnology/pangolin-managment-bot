@@ -68,10 +68,16 @@ module.exports = {
         'primary': colors.primary
       };
       
-      return new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle(`🦔 ${title}`)
         .setColor(colorMap[status] || colors.primary)
         .setTimestamp()
         .setFooter({ text: module.exports.getFooter() });
+
+        // Add thumbnail if URL is available
+        if (module.exports.thumbnailUrl) {
+          embed.setThumbnail(module.exports.thumbnailUrl);
+        } 
+        return embed;
     }
   };
