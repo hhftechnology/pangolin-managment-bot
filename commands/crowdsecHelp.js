@@ -28,7 +28,7 @@ module.exports = {
           description: 'Manage CrowdSec decisions (bans, captchas): list, add, delete, and import.'
         },
         {
-          name: '/crowdsecwhitelist',
+          name: '/crowdsecallowlist',
           description: 'Manage CrowdSec whitelists: add trusted IPs and ranges, list, remove, and check status.'
         },
         {

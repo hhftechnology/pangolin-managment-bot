@@ -7,39 +7,75 @@ const path = require('path');
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName("crowdsecwhitelist")
-    .setDescription("Manage CrowdSec IP whitelists")
+    .setName("crowdsecallowlist")
+    .setDescription("Manage CrowdSec IP allowlists")
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('create')
+        .setDescription('Create a new allowlist')
+        .addStringOption(option =>
+          option.setName('name')
+            .setDescription('Name for the new allowlist')
+            .setRequired(true))
+        .addStringOption(option =>
+          option.setName('description')
+            .setDescription('Description for the allowlist')
+            .setRequired(true)))
     .addSubcommand(subcommand =>
       subcommand
         .setName('add')
-        .setDescription('Add an IP or range to whitelist')
+        .setDescription('Add an IP or range to allowlist')
         .addStringOption(option =>
-          option.setName('target')
-            .setDescription('IP address or CIDR range to whitelist')
+          option.setName('name')
+            .setDescription('Name of the allowlist')
             .setRequired(true))
         .addStringOption(option =>
-          option.setName('reason')
-            .setDescription('Reason for whitelisting')
+          option.setName('target')
+            .setDescription('IP address or CIDR range to allowlist')
+            .setRequired(true))
+        .addStringOption(option =>
+          option.setName('expiration')
+            .setDescription('Expiration time (e.g. 7d, 24h, never)')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('comment')
+            .setDescription('Comment for this entry')
             .setRequired(false)))
     .addSubcommand(subcommand =>
       subcommand
         .setName('list')
-        .setDescription('List whitelisted IPs and ranges'))
+        .setDescription('List all allowlists'))
     .addSubcommand(subcommand =>
       subcommand
-        .setName('remove')
-        .setDescription('Remove an IP or range from whitelist')
+        .setName('inspect')
+        .setDescription('Inspect contents of a specific allowlist')
         .addStringOption(option =>
-          option.setName('target')
-            .setDescription('IP address or CIDR range to remove from whitelist')
+          option.setName('name')
+            .setDescription('Name of the allowlist to inspect')
             .setRequired(true)))
     .addSubcommand(subcommand =>
       subcommand
-        .setName('status')
-        .setDescription('Show whitelist configuration status')),
+        .setName('remove')
+        .setDescription('Remove an IP or range from allowlist')
+        .addStringOption(option =>
+          option.setName('name')
+            .setDescription('Name of the allowlist')
+            .setRequired(true))
+        .addStringOption(option =>
+          option.setName('target')
+            .setDescription('IP address or CIDR range to remove')
+            .setRequired(true)))
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('delete')
+        .setDescription('Delete an entire allowlist')
+        .addStringOption(option =>
+          option.setName('name')
+            .setDescription('Name of the allowlist to delete')
+            .setRequired(true))),
             
   async execute(interaction) {
-    console.log(`Executing crowdsecwhitelist command from user ${interaction.user.tag}`);
+    console.log(`Executing crowdsecallowlist command from user ${interaction.user.tag}`);
     
     try {
       await interaction.deferReply().catch(error => {
@@ -55,14 +91,16 @@ module.exports = {
         console.log('No subcommand provided, showing help message');
         
         // Show help message for available subcommands
-        const embed = branding.getHeaderEmbed('CrowdSec Whitelist', 'crowdsec');
+        const embed = branding.getHeaderEmbed('CrowdSec AllowList', 'crowdsec');
         embed.setDescription(`${branding.emojis.crowdsec} Please select one of these subcommands:`);
         
         const subcommands = [
-          { name: 'add', description: 'Add an IP or range to whitelist' },
-          { name: 'list', description: 'List whitelisted IPs and ranges' },
-          { name: 'remove', description: 'Remove an IP or range from whitelist' },
-          { name: 'status', description: 'Show whitelist configuration status' }
+          { name: 'create', description: 'Create a new allowlist' },
+          { name: 'add', description: 'Add an IP or range to an allowlist' },
+          { name: 'list', description: 'List all allowlists' },
+          { name: 'inspect', description: 'Inspect contents of a specific allowlist' },
+          { name: 'remove', description: 'Remove an IP or range from an allowlist' },
+          { name: 'delete', description: 'Delete an entire allowlist' }
         ];
         
         const formattedSubcommands = subcommands.map(cmd => 
@@ -97,32 +135,79 @@ module.exports = {
       }
       
       // Create embed with branding
-      const embed = branding.getHeaderEmbed(`CrowdSec Whitelist - ${subcommand}`, 'crowdsec');
-      embed.setDescription(`${branding.emojis.loading} Processing CrowdSec whitelist command...`);
+      const embed = branding.getHeaderEmbed(`CrowdSec AllowList - ${subcommand}`, 'crowdsec');
+      embed.setDescription(`${branding.emojis.loading} Processing CrowdSec allowlist command...`);
       await interaction.editReply({ embeds: [embed] }).catch(error => {
         console.error('Error updating embed:', error);
       });
       
-      // For adding an IP directly to decisions list (temporary whitelist)
-      if (subcommand === 'add') {
+      // Handle subcommands using the new allowlists API
+      if (subcommand === 'create') {
+        console.log('Executing create subcommand');
+        const name = interaction.options.getString('name');
+        const description = interaction.options.getString('description');
+        
+        // Update embed description
+        embed.setDescription(`${branding.emojis.loading} Creating allowlist "${name}"...`);
+        await interaction.editReply({ embeds: [embed] }).catch(error => {
+          console.error('Error updating embed:', error);
+        });
+        
+        // Execute command to create allowlist
+        const cmd = ['cscli', 'allowlists', 'create', name, '--description', description];
+        console.log('Executing command:', cmd.join(' '));
+        
+        const result = await dockerManager.executeInContainer('crowdsec', cmd).catch(error => {
+          console.error('Error executing command:', error);
+          throw new Error(`Failed to create allowlist: ${error.message}`);
+        });
+        
+        if (!result.success) {
+          throw new Error(`Failed to create allowlist: ${result.error || "Unknown error"}`);
+        }
+        
+        // Update embed
+        embed.setColor(branding.colors.success);
+        embed.setDescription(`${branding.emojis.healthy} Successfully created allowlist "${name}".`);
+        
+        // Create details string
+        const details = [
+          `Name: ${name}`,
+          `Description: ${description}`
+        ];
+        
+        embed.addFields({ name: 'Allowlist Details', value: details.join('\n') });
+        
+        if (result.stdout && result.stdout.trim() !== '') {
+          embed.addFields({ name: 'Output', value: '```\n' + result.stdout + '\n```' });
+        }
+        
+      } else if (subcommand === 'add') {
         console.log('Executing add subcommand');
+        const name = interaction.options.getString('name');
         const target = interaction.options.getString('target');
-        const reason = interaction.options.getString('reason') || 'trusted source';
+        const expiration = interaction.options.getString('expiration') || 'never';
+        const comment = interaction.options.getString('comment');
         
         // Determine if this is an IP or a range
         const isRange = target.includes('/');
-        console.log(`Adding ${isRange ? 'range' : 'IP'}: ${target}`);
+        console.log(`Adding ${isRange ? 'range' : 'IP'}: ${target} to allowlist: ${name}`);
         
-        // Build command to add to decisions
-        let cmd;
-        if (isRange) {
-          cmd = ['cscli', 'decisions', 'add', '--range', target, '--type', 'whitelist', '--duration', '8760h', '--reason', reason];
-        } else {
-          cmd = ['cscli', 'decisions', 'add', '--ip', target, '--type', 'whitelist', '--duration', '8760h', '--reason', reason];
+        // Build command to add to allowlist
+        let cmd = ['cscli', 'allowlists', 'add', name, target];
+        
+        // Add expiration if provided and not 'never'
+        if (expiration && expiration !== 'never') {
+          cmd.push('-e', expiration);
+        }
+        
+        // Add comment if provided
+        if (comment) {
+          cmd.push('-d', comment);
         }
         
         // Update embed description
-        embed.setDescription(`${branding.emojis.loading} Adding ${isRange ? 'range' : 'IP'} ${target} to whitelist...`);
+        embed.setDescription(`${branding.emojis.loading} Adding ${isRange ? 'range' : 'IP'} ${target} to allowlist "${name}"...`);
         await interaction.editReply({ embeds: [embed] }).catch(error => {
           console.error('Error updating embed:', error);
         });
@@ -132,56 +217,106 @@ module.exports = {
         // Execute command
         const result = await dockerManager.executeInContainer('crowdsec', cmd).catch(error => {
           console.error('Error executing command:', error);
-          throw new Error(`Failed to add to whitelist: ${error.message}`);
+          throw new Error(`Failed to add to allowlist: ${error.message}`);
         });
         
         if (!result.success) {
-          throw new Error(`Failed to add to whitelist: ${result.error || "Unknown error"}`);
+          throw new Error(`Failed to add to allowlist: ${result.error || "Unknown error"}`);
         }
         
         // Update embed
         embed.setColor(branding.colors.success);
-        embed.setDescription(`${branding.emojis.healthy} Successfully added ${isRange ? 'range' : 'IP'} to whitelist.`);
+        embed.setDescription(`${branding.emojis.healthy} Successfully added ${isRange ? 'range' : 'IP'} to allowlist.`);
         
         // Create details string
         const details = [
+          `Allowlist: ${name}`,
           `Target: ${target}`,
           `Type: ${isRange ? 'Range' : 'IP address'}`,
-          `Duration: 1 year (8760h)`,
-          `Reason: ${reason}`
+          `Expiration: ${expiration}`,
+          comment ? `Comment: ${comment}` : 'No comment provided'
         ];
         
-        embed.addFields({ name: 'Whitelist Details', value: details.join('\n') });
+        embed.addFields({ name: 'Entry Details', value: details.join('\n') });
         
         if (result.stdout && result.stdout.trim() !== '') {
           embed.addFields({ name: 'Output', value: '```\n' + result.stdout + '\n```' });
         }
         
-        // Add note about permanent whitelisting
-        embed.addFields({ 
-          name: 'Note', 
-          value: 'This adds a temporary whitelist decision valid for 1 year. For permanent whitelisting, consider modifying the whitelist configuration file.' 
-        });
-        
       } else if (subcommand === 'list') {
         console.log('Executing list subcommand');
         
-        // Get all whitelist decisions
-        const cmd = ['cscli', 'decisions', 'list', '--type', 'whitelist'];
+        // List all allowlists
+        const cmd = ['cscli', 'allowlists', 'list', '-o', 'json'];
         console.log('Executing command:', cmd.join(' '));
         
         // Execute command
         const result = await dockerManager.executeInContainer('crowdsec', cmd).catch(error => {
           console.error('Error executing command:', error);
-          throw new Error(`Failed to list whitelist: ${error.message}`);
+          throw new Error(`Failed to list allowlists: ${error.message}`);
         });
         
         if (!result.success) {
-          throw new Error(`Failed to list whitelist: ${result.error || "Unknown error"}`);
+          throw new Error(`Failed to list allowlists: ${result.error || "Unknown error"}`);
+        }
+        
+        // Try to parse JSON output
+        let allowlists = [];
+        try {
+          if (result.stdout && result.stdout.trim() !== '') {
+            allowlists = JSON.parse(result.stdout);
+          }
+        } catch (parseError) {
+          console.error('Error parsing JSON output:', parseError);
+          throw new Error(`Failed to parse allowlists output: ${parseError.message}`);
         }
         
         // Format the output
-        let formattedOutput = 'No whitelist entries found.';
+        let formattedOutput = 'No allowlists found.';
+        if (allowlists.length > 0) {
+          // Create a formatted table-like string
+          const tableRows = allowlists.map(list => 
+            `${list.name.padEnd(20)} | ${list.description.substring(0, 30).padEnd(30)} | ${list.created_at}`
+          );
+          
+          formattedOutput = '```\n' + 
+            'Name                 | Description                      | Created At\n' +
+            '-------------------- | -------------------------------- | --------------------\n' +
+            tableRows.join('\n') + 
+            '\n```';
+        }
+        
+        // Update embed
+        embed.setDescription(`${branding.emojis.crowdsec} CrowdSec AllowLists`);
+        embed.addFields({ name: 'Available AllowLists', value: formattedOutput });
+        
+        // Add usage instructions
+        embed.addFields({ 
+          name: 'Usage Instructions', 
+          value: 'To view the contents of a specific allowlist, use:\n' +
+                 `\`/${interaction.commandName} inspect <name>\``
+        });
+        
+      } else if (subcommand === 'inspect') {
+        console.log('Executing inspect subcommand');
+        const name = interaction.options.getString('name');
+        
+        // Inspect the specific allowlist
+        const cmd = ['cscli', 'allowlists', 'inspect', name];
+        console.log('Executing command:', cmd.join(' '));
+        
+        // Execute command
+        const result = await dockerManager.executeInContainer('crowdsec', cmd).catch(error => {
+          console.error('Error executing command:', error);
+          throw new Error(`Failed to inspect allowlist: ${error.message}`);
+        });
+        
+        if (!result.success) {
+          throw new Error(`Failed to inspect allowlist: ${result.error || "Unknown error"}`);
+        }
+        
+        // Format the output
+        let formattedOutput = 'Allowlist is empty or does not exist.';
         if (result.stdout && result.stdout.trim() !== '') {
           formattedOutput = '```\n' + result.stdout + '\n```';
           
@@ -191,48 +326,24 @@ module.exports = {
           }
         }
         
-        // Check for whitelist configuration in parsers
-        console.log('Checking for whitelist configuration files');
-        const whitelistCheckCmd = ['find', '/etc/crowdsec/parsers', '-name', '*.yaml', '-exec', 'grep', '-l', 'whitelist', '{}', ';'];
-        const whitelistResult = await dockerManager.executeInContainer('crowdsec', whitelistCheckCmd).catch(error => {
-          console.error('Error checking whitelist files:', error);
-          return { success: false, error: error.message };
-        });
-        
         // Update embed
-        embed.setDescription(`${branding.emojis.crowdsec} CrowdSec Whitelist Entries`);
-        embed.addFields({ name: 'Active Whitelist Decisions', value: formattedOutput });
-        
-        // Add information about permanent whitelist files
-        if (whitelistResult && whitelistResult.success && whitelistResult.stdout) {
-          const whitelistFiles = whitelistResult.stdout.split('\n').filter(line => line.trim() !== '');
-          
-          if (whitelistFiles.length > 0) {
-            embed.addFields({ 
-              name: 'Permanent Whitelist Configuration Files', 
-              value: '```\n' + whitelistFiles.join('\n') + '\n```'
-            });
-          }
-        }
+        embed.setDescription(`${branding.emojis.crowdsec} CrowdSec AllowList: ${name}`);
+        embed.addFields({ name: 'Allowlist Content', value: formattedOutput });
         
       } else if (subcommand === 'remove') {
         console.log('Executing remove subcommand');
+        const name = interaction.options.getString('name');
         const target = interaction.options.getString('target');
         
         // Determine if this is an IP or a range
         const isRange = target.includes('/');
-        console.log(`Removing ${isRange ? 'range' : 'IP'}: ${target}`);
+        console.log(`Removing ${isRange ? 'range' : 'IP'}: ${target} from allowlist: ${name}`);
         
         // Build command
-        let cmd;
-        if (isRange) {
-          cmd = ['cscli', 'decisions', 'delete', '--range', target, '--type', 'whitelist'];
-        } else {
-          cmd = ['cscli', 'decisions', 'delete', '--ip', target, '--type', 'whitelist'];
-        }
+        const cmd = ['cscli', 'allowlists', 'remove', name, target];
         
         // Update embed description
-        embed.setDescription(`${branding.emojis.loading} Removing ${isRange ? 'range' : 'IP'} ${target} from whitelist...`);
+        embed.setDescription(`${branding.emojis.loading} Removing ${isRange ? 'range' : 'IP'} ${target} from allowlist "${name}"...`);
         await interaction.editReply({ embeds: [embed] }).catch(error => {
           console.error('Error updating embed:', error);
         });
@@ -242,19 +353,20 @@ module.exports = {
         // Execute command
         const result = await dockerManager.executeInContainer('crowdsec', cmd).catch(error => {
           console.error('Error executing command:', error);
-          throw new Error(`Failed to remove from whitelist: ${error.message}`);
+          throw new Error(`Failed to remove from allowlist: ${error.message}`);
         });
         
         if (!result.success) {
-          throw new Error(`Failed to remove from whitelist: ${result.error || "Unknown error"}`);
+          throw new Error(`Failed to remove from allowlist: ${result.error || "Unknown error"}`);
         }
         
         // Update embed
         embed.setColor(branding.colors.success);
-        embed.setDescription(`${branding.emojis.healthy} Successfully removed ${isRange ? 'range' : 'IP'} from whitelist.`);
+        embed.setDescription(`${branding.emojis.healthy} Successfully removed ${isRange ? 'range' : 'IP'} from allowlist.`);
         
         // Create details string
         const details = [
+          `Allowlist: ${name}`,
           `Target: ${target}`,
           `Type: ${isRange ? 'Range' : 'IP address'}`
         ];
@@ -265,135 +377,38 @@ module.exports = {
           embed.addFields({ name: 'Output', value: '```\n' + result.stdout + '\n```' });
         }
         
-      } else if (subcommand === 'status') {
-        console.log('Executing status subcommand');
+      } else if (subcommand === 'delete') {
+        console.log('Executing delete subcommand');
+        const name = interaction.options.getString('name');
         
-        // Check for whitelist configuration in parsers
-        console.log('Checking for whitelist configuration files');
-        const whitelistCheckCmd = ['find', '/etc/crowdsec/parsers', '-name', '*.yaml', '-exec', 'grep', '-l', 'whitelist', '{}', ';'];
-        const whitelistResult = await dockerManager.executeInContainer('crowdsec', whitelistCheckCmd).catch(error => {
-          console.error('Error checking whitelist files:', error);
-          return { success: false, error: error.message };
+        // Update embed description
+        embed.setDescription(`${branding.emojis.loading} Deleting allowlist "${name}"...`);
+        await interaction.editReply({ embeds: [embed] }).catch(error => {
+          console.error('Error updating embed:', error);
         });
         
-        // Get content of whitelists.yaml if it exists
-        console.log('Checking for whitelists.yaml content');
-        const whitelistContentCmd = ['cat', '/etc/crowdsec/parsers/s02-enrich/whitelists.yaml'];
-        const contentResult = await dockerManager.executeInContainer('crowdsec', whitelistContentCmd).catch(error => {
-          console.error('Error getting whitelist content:', error);
-          return { success: false, error: error.message };
+        // Build command
+        const cmd = ['cscli', 'allowlists', 'delete', name];
+        console.log('Executing command:', cmd.join(' '));
+        
+        // Execute command
+        const result = await dockerManager.executeInContainer('crowdsec', cmd).catch(error => {
+          console.error('Error executing command:', error);
+          throw new Error(`Failed to delete allowlist: ${error.message}`);
         });
         
-        // Get all whitelist decisions
-        console.log('Getting active whitelist decisions');
-        const decisionsCmd = ['cscli', 'decisions', 'list', '--type', 'whitelist'];
-        const decisionsResult = await dockerManager.executeInContainer('crowdsec', decisionsCmd).catch(error => {
-          console.error('Error getting whitelist decisions:', error);
-          return { success: false, error: error.message };
-        });
+        if (!result.success) {
+          throw new Error(`Failed to delete allowlist: ${result.error || "Unknown error"}`);
+        }
         
         // Update embed
-        embed.setDescription(`${branding.emojis.crowdsec} CrowdSec Whitelist Status`);
+        embed.setColor(branding.colors.success);
+        embed.setDescription(`${branding.emojis.healthy} Successfully deleted allowlist "${name}".`);
         
-        // Add information about whitelist files
-        if (whitelistResult && whitelistResult.success && whitelistResult.stdout) {
-          const whitelistFiles = whitelistResult.stdout.split('\n').filter(line => line.trim() !== '');
-          
-          if (whitelistFiles.length > 0) {
-            embed.addFields({ 
-              name: 'Whitelist Configuration Files', 
-              value: '```\n' + whitelistFiles.join('\n') + '\n```'
-            });
-          } else {
-            embed.addFields({ 
-              name: 'Whitelist Configuration Files', 
-              value: 'No permanent whitelist configuration files found.'
-            });
-          }
+        if (result.stdout && result.stdout.trim() !== '') {
+          embed.addFields({ name: 'Output', value: '```\n' + result.stdout + '\n```' });
         }
         
-        // Add content of main whitelist file if it exists
-        if (contentResult && contentResult.success && contentResult.stdout) {
-          const content = contentResult.stdout;
-          
-          try {
-            // Try to extract IPs, CIDRs and expressions
-            const ipMatches = content.match(/ip:[\s\S]*?(?=\n\w|$)/);
-            const cidrMatches = content.match(/cidr:[\s\S]*?(?=\n\w|$)/);
-            const exprMatches = content.match(/expression:[\s\S]*?(?=\n\w|$)/);
-            
-            let ipList = 'None';
-            let cidrList = 'None';
-            let exprList = 'None';
-            
-            if (ipMatches && ipMatches[0]) {
-              ipList = ipMatches[0].replace(/ip:/, '').trim();
-            }
-            
-            if (cidrMatches && cidrMatches[0]) {
-              cidrList = cidrMatches[0].replace(/cidr:/, '').trim();
-            }
-            
-            if (exprMatches && exprMatches[0]) {
-              exprList = exprMatches[0].replace(/expression:/, '').trim();
-            }
-            
-            embed.addFields({
-              name: 'Permanent Whitelist Configuration',
-              value: [
-                '**Whitelisted IPs:**',
-                '```' + ipList + '```',
-                '**Whitelisted CIDR Ranges:**',
-                '```' + cidrList + '```',
-                '**Whitelist Expressions:**',
-                '```' + exprList + '```'
-              ].join('\n')
-            });
-          } catch (parseError) {
-            console.error('Error parsing whitelist content:', parseError);
-            embed.addFields({
-              name: 'Permanent Whitelist Configuration',
-              value: 'Error parsing configuration file. Raw content:\n```\n' + 
-                     (content.length > 1000 ? content.substring(0, 1000) + '...' : content) + '\n```'
-            });
-          }
-        }
-        
-        // Add information about active whitelist decisions
-        if (decisionsResult && decisionsResult.success) {
-          let decisionsOutput = 'No active whitelist decisions found.';
-          if (decisionsResult.stdout && decisionsResult.stdout.trim() !== '') {
-            decisionsOutput = '```\n' + decisionsResult.stdout + '\n```';
-            
-            // If output is too long, truncate it
-            if (decisionsOutput.length > 2000) {
-              decisionsOutput = '```\n' + decisionsResult.stdout.substring(0, 1900) + '\n...\n(Output truncated due to size limits)\n```';
-            }
-          }
-          
-          embed.addFields({ name: 'Active Whitelist Decisions', value: decisionsOutput });
-        }
-        
-        // Add a guide for permanent whitelisting
-        embed.addFields({
-          name: 'How to Configure Permanent Whitelist',
-          value: 'To set up a permanent whitelist, create or edit `/etc/crowdsec/parsers/s02-enrich/whitelists.yaml` ' +
-                'with your whitelist configuration and restart CrowdSec. Example format:\n' +
-                '```yaml\n' +
-                'name: crowdsecurity/whitelists\n' +
-                'description: "Whitelist configuration for trusted IPs and users"\n' +
-                'whitelist:\n' +
-                '  reason: "trusted sources"\n' +
-                '  ip:\n' +
-                '    - "192.168.1.1"\n' +
-                '  cidr:\n' +
-                '    - "10.0.0.0/8"\n' +
-                '    - "192.168.1.0/24"\n' +
-                '  expression:\n' +
-                '    - evt.Parsed.source_ip == \'127.0.0.1\'\n' +
-                '```\n' +
-                'After editing, restart CrowdSec with `docker restart crowdsec`'
-        });
       } else {
         throw new Error(`Unknown subcommand: ${subcommand}`);
       }
@@ -403,11 +418,11 @@ module.exports = {
       });
       
     } catch (error) {
-      console.error('Error executing crowdsecWhitelist command:', error);
+      console.error('Error executing crowdsecAllowList command:', error);
       
       try {
         // Create error embed with branding
-        const errorEmbed = branding.getHeaderEmbed('Error Managing CrowdSec Whitelist', 'danger');
+        const errorEmbed = branding.getHeaderEmbed('Error Managing CrowdSec AllowList', 'danger');
         errorEmbed.setDescription(`${branding.emojis.error} An error occurred:\n\`\`\`${error.message}\`\`\``);
         
         // Check if interaction has already been replied to
