@@ -14,6 +14,9 @@ module.exports = {
       info: 0x3498DB,         // Blue (for informational displays)
       crowdsec: 0x5865F2      // CrowdSec's blue color
     },
+
+      // CrowdSec logo thumbnail URL
+    thumbnailUrl: 'https://cdn.jsdelivr.net/gh/selfhst/icons/png/pangolin-light.png', // Replace with your preferred CrowdSec logo
     
     // Common emojis for status indicators
     emojis: {
@@ -65,10 +68,16 @@ module.exports = {
         'primary': colors.primary
       };
       
-      return new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle(`🦔 ${title}`)
         .setColor(colorMap[status] || colors.primary)
         .setTimestamp()
         .setFooter({ text: module.exports.getFooter() });
+
+        // Add thumbnail if URL is available
+        if (module.exports.thumbnailUrl) {
+          embed.setThumbnail(module.exports.thumbnailUrl);
+        } 
+        return embed;
     }
   };

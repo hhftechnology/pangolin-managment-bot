@@ -107,8 +107,6 @@ module.exports = {
       // Create embed with CrowdSec-specific branding
       const embed = branding.getHeaderEmbed(`${branding.emojis.crowdsec} CrowdSec Security Status`, 'crowdsec');
       
-      // Set a security shield thumbnail
-      embed.setThumbnail('https://assets.crowdsec.net/images/logos/crowdsec/crowdsec-logo.png');
       
       // Set description based on security status
       if (decisions.length > 0) {

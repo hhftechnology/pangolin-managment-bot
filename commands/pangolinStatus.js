@@ -19,9 +19,7 @@ module.exports = {
       
       // Create embed with Pangolin branding
       const embed = branding.getHeaderEmbed('Pangolin Stack Status');
-      
-      // Add thumbnail for Pangolin
-      embed.setThumbnail('https://cdn.jsdelivr.net/gh/alohe/avatars/png/vibrent_21.png');
+    
       
       // Add description with overview
       let healthySummary = 0;

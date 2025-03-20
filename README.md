@@ -149,28 +149,6 @@ The bot offers comprehensive control over CrowdSec security including:
 
 Use the `/crowdsechelp` command to see all available security commands.
 
-## 🔧 Development
-
-### Adding New Commands
-
-1. Create a new file in the `commands/` directory
-2. Export an object with `data` (SlashCommandBuilder) and `execute` function
-3. Redeploy commands with `node deployCommands.js`
-
-### Directory Structure
-
-```
-pangolin-discord-bot/
-├── commands/           # Discord slash commands
-├── backend/            # Backend utilities and services
-│   ├── dockerManager.js   # Docker interaction
-│   ├── systemMetrics.js   # System monitoring
-│   ├── backupManager.js   # Backup functionality
-│   └── pangolinBranding.js # UI styling
-├── index.js            # Main bot entry point
-├── deployCommands.js   # Command deployment utility
-└── package.json        # Dependencies and scripts
-```
 
 
 ## 🛟 Support
