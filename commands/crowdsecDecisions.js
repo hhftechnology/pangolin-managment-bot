@@ -593,7 +593,7 @@ module.exports = {
             
             // Import this batch immediately
             console.log(`Importing batch ${batchIndex+1}/${totalBatches}...`);
-            const importCmd = ['cscli', 'decisions', 'import', '--file', batchFilename];
+            const importCmd = ['cscli', 'decisions', 'import', '-i', batchFilename];
             
             const importResult = await dockerManager.executeInContainer('crowdsec', importCmd);
             
