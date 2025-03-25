@@ -545,32 +545,63 @@ module.exports = {
             console.error('Error updating embed:', error);
           });
           
-          // Write the decisions to a temporary file in the container
-          const crowdsecDecisionsJson = JSON.stringify(crowdsecDecisions, null, 2);
+          // Create a JSON file inside the container using echo and Write the decisions using the Docker API
+          const crowdsecDecisionsJson = JSON.stringify(crowdsecDecisions);
           
-          // First write the file locally
-          const localTempPath = path.join('/tmp', `abuseipdb_blacklist_${Date.now()}.json`);
+          console.log('Writing decisions to container file...');
           
-          console.log('Writing decisions to temporary file...');
-          try {
-            await fs.writeFile(localTempPath, crowdsecDecisionsJson);
-            console.log(`Successfully wrote ${crowdsecDecisions.length} decisions to ${localTempPath}`);
-          } catch (error) {
-            console.error('Error writing local file:', error);
-            throw new Error(`Failed to write local decisions file: ${error.message}`);
-          }
+          // Split the large JSON into smaller chunks if needed to avoid command line length limits
+          // Maximum number of IPs to process in each batch
+          const BATCH_SIZE = 1000;
+          const totalBatches = Math.ceil(crowdsecDecisions.length / BATCH_SIZE);
           
-          // Now copy the file into the container using docker cp
-          const execPromise = util.promisify(exec);
-          try {
-            await execPromise(`docker cp ${localTempPath} crowdsec:${tempFilename}`);
-            console.log(`Successfully copied decisions file to container at ${tempFilename}`);
+          console.log(`Processing ${crowdsecDecisions.length} IPs in ${totalBatches} batches of ${BATCH_SIZE}`);
+          
+          // Process in batches
+          for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+            const start = batchIndex * BATCH_SIZE;
+            const end = Math.min(start + BATCH_SIZE, crowdsecDecisions.length);
+            const batchDecisions = crowdsecDecisions.slice(start, end);
             
-            // Clean up local file after copying
-            await fs.unlink(localTempPath);
-          } catch (error) {
-            console.error('Error copying file to container:', error);
-            throw new Error(`Failed to copy decisions file to container: ${error.message}`);
+            // Create a temporary batch filename with batch number
+            const batchFilename = `/tmp/abuseipdb_batch_${batchIndex+1}_of_${totalBatches}.json`;
+            
+            // Create batch JSON
+            const batchJson = JSON.stringify(batchDecisions);
+            
+            console.log(`Writing batch ${batchIndex+1}/${totalBatches} with ${batchDecisions.length} IPs`);
+            
+            // Use echo to write the file (more reliable for smaller files)
+            // Escape double quotes in the JSON string for the shell command
+            const escapedJson = batchJson.replace(/"/g, '\\"');
+            const writeCmd = [
+              'bash', '-c', `echo "${escapedJson}" > ${batchFilename}`
+            ];
+            
+            const writeResult = await dockerManager.executeInContainer('crowdsec', writeCmd);
+            
+            if (!writeResult.success) {
+              throw new Error(`Failed to write decisions batch file: ${writeResult.error || "Unknown error"}`);
+            }
+            
+            // Import this batch immediately
+            console.log(`Importing batch ${batchIndex+1}/${totalBatches}...`);
+            const importCmd = ['cscli', 'decisions', 'import', '--file', batchFilename];
+            
+            const importResult = await dockerManager.executeInContainer('crowdsec', importCmd);
+            
+            if (!importResult.success) {
+              throw new Error(`Failed to import decisions batch: ${importResult.error || "Unknown error"}`);
+            }
+            
+            // Clean up this batch file
+            const cleanupCmd = ['rm', batchFilename];
+            await dockerManager.executeInContainer('crowdsec', cleanupCmd).catch(error => {
+              console.error(`Error cleaning up batch file ${batchFilename}:`, error);
+              // Continue despite cleanup errors
+            });
+            
+            console.log(`Successfully imported batch ${batchIndex+1}/${totalBatches}`);
           }
           
           // Import decisions
