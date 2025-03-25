@@ -561,7 +561,14 @@ module.exports = {
           for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
             const start = batchIndex * BATCH_SIZE;
             const end = Math.min(start + BATCH_SIZE, crowdsecDecisions.length);
-            const batchDecisions = crowdsecDecisions.slice(start, end);
+            // Fix duration format to include 'h' if not already present
+            const batchDecisions = crowdsecDecisions.slice(start, end).map(decision => {
+              // Make sure duration has 'h' suffix if it's just a number
+              if (decision.duration && !isNaN(decision.duration) && !decision.duration.endsWith('h')) {
+                decision.duration = `${decision.duration}h`;
+              }
+              return decision;
+            });
             
             // Create a temporary batch filename with batch number
             const batchFilename = `/tmp/abuseipdb_batch_${batchIndex+1}_of_${totalBatches}.json`;
@@ -604,28 +611,9 @@ module.exports = {
             console.log(`Successfully imported batch ${batchIndex+1}/${totalBatches}`);
           }
           
-          // Import decisions
-          console.log('Importing decisions to CrowdSec...');
-          const importCmd = ['cscli', 'decisions', 'import', '--file', tempFilename];
+          // Note: Import is now handled in the batch processing loop above
           
-          const importResult = await dockerManager.executeInContainer('crowdsec', importCmd).catch(error => {
-            console.error('Error importing decisions:', error);
-            throw new Error(`Failed to import decisions: ${error.message}`);
-          });
-          
-          if (!importResult.success) {
-            throw new Error(`Failed to import decisions: ${importResult.error || "Unknown error"}`);
-          }
-          
-          // Clean up temp file
-          console.log('Cleaning up temporary file...');
-          const cleanupCmd = ['rm', tempFilename];
-          await dockerManager.executeInContainer('crowdsec', cleanupCmd).catch(error => {
-            console.error('Error cleaning up temp file:', error);
-            // Just log this error but don't fail the whole operation
-          });
-          
-          // Update embed with success message
+                    // Update embed with success message
           embed.setColor(branding.colors.success);
           embed.setDescription(`${branding.emojis.healthy} Successfully imported ${crowdsecDecisions.length} IPs from AbuseIPDB blacklist to CrowdSec.`);
           
@@ -648,18 +636,13 @@ module.exports = {
             });
           }
           
-          // Add import output if available
-          if (importResult.stdout && importResult.stdout.trim() !== '') {
-            await interaction.editReply({
-              embeds: [embed],
-              files: [{
-                attachment: Buffer.from(importResult.stdout),
-                name: `crowdsec-blacklist-import.txt`
-              }]
-            });
-          } else {
-            await interaction.editReply({ embeds: [embed] });
-          }
+          // Add processing information
+          embed.addFields({
+            name: 'Processing Details',
+            value: `Processed in ${totalBatches} batch(es) of ${BATCH_SIZE} IPs each`
+          });
+          
+          await interaction.editReply({ embeds: [embed] });
           
         } catch (error) {
           console.error('Error importing blacklist:', error);
