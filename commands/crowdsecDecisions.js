@@ -455,32 +455,65 @@ module.exports = {
           // Create temporary file path and name within the container
           const tempFilename = `/tmp/abuseipdb_blacklist_${Date.now()}.json`;
           
-          // Execute fetch command via docker to get the blacklist
-          const fetchCmd = [
-            'curl', '-s',
-            '-H', `Key: ${apiKey}`,
-            '-H', 'Accept: application/json',
-            `https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=${confidenceMinimum}`
-          ];
-          
+          // Fetch the blacklist using node-fetch (from the bot instead of inside the container)
           console.log('Fetching AbuseIPDB blacklist...');
           
-          const fetchResult = await dockerManager.executeInContainer('crowdsec', fetchCmd).catch(error => {
-            console.error('Error executing fetch command:', error);
-            throw new Error(`Failed to fetch blacklist: ${error.message}`);
-          });
+          // Use node's built-in https module instead of curl
+          const https = require('https');
           
-          if (!fetchResult.success || !fetchResult.stdout) {
-            throw new Error(`Failed to fetch blacklist: ${fetchResult.error || "Empty response from AbuseIPDB"}`);
-          }
+          // Create a promise-based request function
+          const fetchBlacklist = () => {
+            return new Promise((resolve, reject) => {
+              const options = {
+                hostname: 'api.abuseipdb.com',
+                path: `/api/v2/blacklist?confidenceMinimum=${confidenceMinimum}`,
+                method: 'GET',
+                headers: {
+                  'Key': apiKey,
+                  'Accept': 'application/json'
+                }
+              };
+              
+              const req = https.request(options, (res) => {
+                let data = '';
+                
+                // A chunk of data has been received
+                res.on('data', (chunk) => {
+                  data += chunk;
+                });
+                
+                // The whole response has been received
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try {
+                      resolve(JSON.parse(data));
+                    } catch (error) {
+                      reject(new Error(`Failed to parse API response: ${error.message}`));
+                    }
+                  } else {
+                    reject(new Error(`API request failed with status code ${res.statusCode}: ${data}`));
+                  }
+                });
+              });
+              
+              // Handle request errors
+              req.on('error', (error) => {
+                reject(new Error(`API request failed: ${error.message}`));
+              });
+              
+              // End the request
+              req.end();
+            });
+          };
           
-          // Parse response
+          // Fetch the blacklist
           let responseData;
           try {
-            responseData = JSON.parse(fetchResult.stdout);
+            responseData = await fetchBlacklist();
+            console.log(`Successfully fetched blacklist from AbuseIPDB (total IPs: ${responseData.data?.length || 0})`);
           } catch (error) {
-            console.error('Error parsing API response:', error);
-            throw new Error(`Failed to parse API response: ${error.message}`);
+            console.error('Error fetching blacklist:', error);
+            throw new Error(`Failed to fetch blacklist: ${error.message}`);
           }
           
           if (!responseData.data || !Array.isArray(responseData.data)) {
@@ -513,22 +546,31 @@ module.exports = {
           });
           
           // Write the decisions to a temporary file in the container
-          const crowdsecDecisionsJson = JSON.stringify(crowdsecDecisions);
+          const crowdsecDecisionsJson = JSON.stringify(crowdsecDecisions, null, 2);
           
-          // Use echo with shell to write the file (avoids potential file transfer issues)
-          const writeCmd = [
-            'bash', '-c', `echo '${crowdsecDecisionsJson}' > ${tempFilename}`
-          ];
+          // First write the file locally
+          const localTempPath = path.join('/tmp', `abuseipdb_blacklist_${Date.now()}.json`);
           
           console.log('Writing decisions to temporary file...');
+          try {
+            await fs.writeFile(localTempPath, crowdsecDecisionsJson);
+            console.log(`Successfully wrote ${crowdsecDecisions.length} decisions to ${localTempPath}`);
+          } catch (error) {
+            console.error('Error writing local file:', error);
+            throw new Error(`Failed to write local decisions file: ${error.message}`);
+          }
           
-          const writeResult = await dockerManager.executeInContainer('crowdsec', writeCmd).catch(error => {
-            console.error('Error writing decisions file:', error);
-            throw new Error(`Failed to write decisions file: ${error.message}`);
-          });
-          
-          if (!writeResult.success) {
-            throw new Error(`Failed to write decisions file: ${writeResult.error || "Unknown error"}`);
+          // Now copy the file into the container using docker cp
+          const execPromise = util.promisify(exec);
+          try {
+            await execPromise(`docker cp ${localTempPath} crowdsec:${tempFilename}`);
+            console.log(`Successfully copied decisions file to container at ${tempFilename}`);
+            
+            // Clean up local file after copying
+            await fs.unlink(localTempPath);
+          } catch (error) {
+            console.error('Error copying file to container:', error);
+            throw new Error(`Failed to copy decisions file to container: ${error.message}`);
           }
           
           // Import decisions
