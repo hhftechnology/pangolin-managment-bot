@@ -25,10 +25,10 @@ module.exports = {
         },
         {
           name: '/crowdsecdecisions',
-          description: 'Manage CrowdSec decisions (bans, captchas): list, add, delete, and import.'
+          description: 'Manage CrowdSec decisions (bans, captchas): list, add, delete, and import. ip-blacklist inspired by https://github.com/goremykin'
         },
         {
-          name: '/crowdsecwhitelist',
+          name: '/crowdsecallowlists',
           description: 'Manage CrowdSec whitelists: add trusted IPs and ranges, list, remove, and check status.'
         },
         {
