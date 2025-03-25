@@ -597,8 +597,23 @@ module.exports = {
             
             const importResult = await dockerManager.executeInContainer('crowdsec', importCmd);
             
+            // CrowdSec outputs informational messages to stderr which aren't actually errors
+            // Success messages look like: level=info msg="Imported X decisions"
+            let isActualError = false;
             if (!importResult.success) {
-              throw new Error(`Failed to import decisions batch: ${importResult.error || "Unknown error"}`);
+              // Check if this is actually an informational message about successfully importing
+              if (importResult.stderr && importResult.stderr.includes('level=info') && 
+                  (importResult.stderr.includes('Imported') || importResult.stderr.includes('Parsing'))) {
+                // This is actually a success message, not an error
+                console.log(`Successfully imported batch ${batchIndex+1}/${totalBatches} (from stderr info messages)`);
+                isActualError = false;
+              } else {
+                isActualError = true;
+              }
+            }
+            
+            if (isActualError) {
+              throw new Error(`Failed to import decisions batch ${batchIndex+1}/${totalBatches}: ${importResult.error || "Unknown error"}`);
             }
             
             // Clean up this batch file
