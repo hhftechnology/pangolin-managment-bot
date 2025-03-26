@@ -1,4 +1,4 @@
-// commands/dockerPrune.js
+// commands/dockerPrune.js - Modified with better error handling
 const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require("discord.js");
 const Docker = require('node-docker-api').Docker;
 const branding = require('../backend/pangolinBranding');
@@ -149,20 +149,30 @@ async function executePrune(docker, interaction, embed, pruneAll) {
     // Execute pruning operation through the Docker API
     let result;
     
-    if (pruneAll) {
-      // Prune all unused images
-      result = await docker.image.prune({ filters: { dangling: { "false": true } } });
-    } else {
-      // Prune only dangling images
-      result = await docker.image.prune();
+    try {
+      if (pruneAll) {
+        // Prune all unused images
+        result = await docker.image.prune({ filters: { dangling: { "false": true } } });
+      } else {
+        // Prune only dangling images
+        result = await docker.image.prune();
+      }
+    } catch (pruneError) {
+      console.error("Error in Docker prune API call:", pruneError);
+      throw new Error(`Docker prune API error: ${pruneError.message}`);
     }
     
-    // Get response data
-    const pruneResult = result.body;
+    // Get response data, handle missing properties safely
+    let imagesDeleted = [];
+    let spaceReclaimed = 0;
     
-    // Check if any images were removed
-    const imagesDeleted = pruneResult.ImagesDeleted || [];
-    const spaceReclaimed = pruneResult.SpaceReclaimed || 0;
+    if (result && result.body) {
+      // Try to access the properties safely
+      imagesDeleted = result.body.ImagesDeleted || [];
+      spaceReclaimed = result.body.SpaceReclaimed || 0;
+    } else {
+      console.warn("Docker prune API returned unexpected response:", result);
+    }
     
     // Convert bytes to human-readable format
     const formattedSpace = formatBytes(spaceReclaimed);
@@ -173,12 +183,12 @@ async function executePrune(docker, interaction, embed, pruneAll) {
     
     // Add fields with pruning statistics
     successEmbed.addFields(
-      { name: 'Images Removed', value: `${imagesDeleted.length}`, inline: true },
+      { name: 'Images Removed', value: `${Array.isArray(imagesDeleted) ? imagesDeleted.length : 0}`, inline: true },
       { name: 'Space Reclaimed', value: formattedSpace, inline: true }
     );
     
     // If images were removed, add details
-    if (imagesDeleted.length > 0) {
+    if (Array.isArray(imagesDeleted) && imagesDeleted.length > 0) {
       // Collect untagged and deleted images
       const untaggedImages = imagesDeleted.filter(img => img.Untagged).map(img => img.Untagged);
       const deletedImages = imagesDeleted.filter(img => img.Deleted).map(img => img.Deleted);
@@ -232,7 +242,7 @@ async function executePrune(docker, interaction, embed, pruneAll) {
  * Format bytes to human-readable format
  */
 function formatBytes(bytes, decimals = 2) {
-  if (bytes === 0) return '0 Bytes';
+  if (!bytes || bytes === 0) return '0 Bytes';
   
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;

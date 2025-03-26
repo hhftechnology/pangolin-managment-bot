@@ -1,11 +1,7 @@
-// commands/dockerPull.js
+// commands/dockerPull.js - Modified to use Docker API instead of CLI
 const { SlashCommandBuilder } = require("discord.js");
-const { exec } = require('child_process');
-const util = require('util');
+const Docker = require('node-docker-api').Docker;
 const branding = require('../backend/pangolinBranding');
-
-// Promisify exec
-const execPromise = util.promisify(exec);
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -43,51 +39,84 @@ module.exports = {
       // Send initial response
       await interaction.editReply({ embeds: [embed] });
       
-      // Execute the docker pull command
-      const pullCommand = `docker pull ${sanitizedImageName}`;
-      const pullProcess = exec(pullCommand);
+      // Create Docker API client
+      const docker = new Docker({ socketPath: '/var/run/docker.sock' });
       
-      // Variable to store pull progress output
+      // Use Docker API to pull the image
+      const stream = await docker.image.create({}, { fromImage: sanitizedImageName });
+      
+      // Process the stream to track progress
       let pullOutput = '';
+      let lastUpdate = Date.now();
+      const UPDATE_INTERVAL = 3000; // Update message every 3 seconds
       
-      // Listen for stdout data
-      pullProcess.stdout.on('data', (data) => {
-        pullOutput += data;
-        
-        // Update the message with the current progress
-        // But not too frequently to avoid API rate limits
-        if (pullOutput.length > 0 && pullOutput.length % 100 === 0) {
-          const updatedEmbed = branding.getHeaderEmbed(`Pulling Docker Image: ${sanitizedImageName}`, 'info');
-          updatedEmbed.setDescription(
-            `${branding.emojis.loading} Pulling image \`${sanitizedImageName}\`...\n\n` +
-            `Progress:\n\`\`\`${pullOutput.slice(-1500)}\`\`\``
-          );
-          
-          interaction.editReply({ embeds: [updatedEmbed] }).catch(error => {
-            console.error('Error updating embed:', error);
-          });
-        }
-      });
-      
-      // Listen for stderr data
-      pullProcess.stderr.on('data', (data) => {
-        pullOutput += `ERROR: ${data}`;
-      });
-      
-      // Wait for the pull to complete
       await new Promise((resolve, reject) => {
-        pullProcess.on('close', (code) => {
-          if (code === 0) {
-            resolve();
-          } else {
-            reject(new Error(`Pull process exited with code ${code}`));
+        stream.on('data', (data) => {
+          try {
+            // Parse the JSON data
+            const chunk = JSON.parse(data.toString());
+            
+            if (chunk.status) {
+              // Add status update to output with newline
+              if (chunk.progress) {
+                pullOutput = `${chunk.status}: ${chunk.progress}\n${pullOutput}`;
+              } else {
+                pullOutput = `${chunk.status}\n${pullOutput}`;
+              }
+              
+              // Limit output length to avoid huge messages
+              if (pullOutput.length > 1500) {
+                pullOutput = pullOutput.substring(0, 1500) + '...\n(Output truncated)';
+              }
+              
+              // Update the message periodically to avoid rate limiting
+              const now = Date.now();
+              if (now - lastUpdate > UPDATE_INTERVAL) {
+                const updatedEmbed = branding.getHeaderEmbed(`Pulling Docker Image: ${sanitizedImageName}`, 'info');
+                updatedEmbed.setDescription(
+                  `${branding.emojis.loading} Pulling image \`${sanitizedImageName}\`...\n\n` +
+                  `Progress:\n\`\`\`${pullOutput}\`\`\``
+                );
+                
+                interaction.editReply({ embeds: [updatedEmbed] }).catch(error => {
+                  console.error('Error updating embed:', error);
+                });
+                
+                lastUpdate = now;
+              }
+            }
+            
+            if (chunk.error) {
+              reject(new Error(chunk.error));
+            }
+          } catch (error) {
+            // If we can't parse the JSON, just log the error and continue
+            console.error('Error parsing pull stream data:', error);
           }
         });
         
-        pullProcess.on('error', (error) => {
-          reject(error);
-        });
+        stream.on('end', resolve);
+        stream.on('error', reject);
       });
+      
+      // Get image details after pulling
+      let imageDetails = {};
+      try {
+        const images = await docker.image.list({
+          filters: { reference: [sanitizedImageName] }
+        });
+        
+        if (images && images.length > 0) {
+          imageDetails = {
+            id: images[0].data.Id.substring(0, 12),
+            size: formatBytes(images[0].data.Size),
+            created: new Date(images[0].data.Created * 1000).toLocaleString()
+          };
+        }
+      } catch (error) {
+        console.error('Error getting image details:', error);
+        // Continue even if we can't get details
+      }
       
       // Update with success message
       const successEmbed = branding.getHeaderEmbed(`Docker Image Pulled: ${sanitizedImageName}`, 'success');
@@ -97,22 +126,13 @@ module.exports = {
         `\`/dockercreate image:${sanitizedImageName} name:mycontainer\``
       );
       
-      // Check if we can get image details
-      try {
-        const { stdout } = await execPromise(`docker image inspect ${sanitizedImageName} --format "{{.Size}},{{.Created}}"`);
-        const [size, created] = stdout.trim().split(',');
-        
-        if (size && created) {
-          const sizeInMB = parseInt(size) / (1024 * 1024);
-          const createdDate = new Date(created);
-          
-          successEmbed.addFields(
-            { name: 'Image Size', value: `${sizeInMB.toFixed(2)} MB`, inline: true },
-            { name: 'Created', value: createdDate.toLocaleString(), inline: true }
-          );
-        }
-      } catch (inspectError) {
-        console.error('Error getting image details:', inspectError);
+      // Add image details if available
+      if (imageDetails.id) {
+        successEmbed.addFields(
+          { name: 'Image ID', value: imageDetails.id, inline: true },
+          { name: 'Image Size', value: imageDetails.size, inline: true },
+          { name: 'Created', value: imageDetails.created, inline: true }
+        );
       }
       
       await interaction.editReply({ embeds: [successEmbed] });
@@ -130,3 +150,16 @@ module.exports = {
     }
   }
 };
+
+// Helper function to format bytes
+function formatBytes(bytes, decimals = 2) {
+  if (bytes === 0) return '0 Bytes';
+  
+  const k = 1024;
+  const dm = decimals < 0 ? 0 : decimals;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+  
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+}

@@ -1,7 +1,11 @@
-// commands/crowdsecDecisions.js
+// Modified commands/crowdsecDecisions.js to add blacklist functionality
 const { SlashCommandBuilder } = require("discord.js");
 const dockerManager = require("../backend/dockerManager");
 const branding = require('../backend/pangolinBranding');
+const fs = require('fs').promises;
+const path = require('path');
+const util = require('util');
+const { exec } = require('child_process');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -118,7 +122,24 @@ module.exports = {
     .addSubcommand(subcommand =>
       subcommand
         .setName('import')
-        .setDescription('Import decisions from a file (admin only)')),
+        .setDescription('Import decisions from a file (admin only)'))
+    // New blacklist subcommand
+    .addSubcommand(subcommand =>
+      subcommand
+        .setName('blacklist')
+        .setDescription('Import blacklist from AbuseIPDB')
+        .addStringOption(option =>
+          option.setName('apikey')
+            .setDescription('AbuseIPDB API key')
+            .setRequired(true))
+        .addIntegerOption(option =>
+          option.setName('confidence')
+            .setDescription('Minimum confidence score (0-100, default: 90)')
+            .setRequired(false))
+        .addStringOption(option =>
+          option.setName('duration')
+            .setDescription('Ban duration (e.g., 24h, 7d, default: 24h)')
+            .setRequired(false))),
         
   async execute(interaction) {
     console.log(`Executing crowdsecdecisions command from user ${interaction.user.tag}`);
@@ -144,7 +165,8 @@ module.exports = {
           { name: 'list', description: 'List active decisions (bans, captchas, etc.)' },
           { name: 'add', description: 'Add a new decision (ban or whitelist an IP/range)' },
           { name: 'delete', description: 'Delete decisions to remove bans/whitelists' },
-          { name: 'import', description: 'Import decisions from a file (admin only)' }
+          { name: 'import', description: 'Import decisions from a file (admin only)' },
+          { name: 'blacklist', description: 'Import blacklist from AbuseIPDB' }
         ];
         
         const formattedSubcommands = subcommands.map(cmd => 
@@ -417,6 +439,235 @@ module.exports = {
         });
         
         await interaction.editReply({ embeds: [embed] });
+      } else if (subcommand === 'blacklist') {
+        console.log('Executing blacklist subcommand');
+        const apiKey = interaction.options.getString('apikey');
+        const confidenceMinimum = interaction.options.getInteger('confidence') || 90;
+        const banDuration = interaction.options.getString('duration') || '24h';
+        
+        // Update embed description
+        embed.setDescription(`${branding.emojis.loading} Fetching blacklist from AbuseIPDB with confidence ≥ ${confidenceMinimum}...`);
+        await interaction.editReply({ embeds: [embed] }).catch(error => {
+          console.error('Error updating embed:', error);
+        });
+        
+        try {
+          // Create temporary file path and name within the container
+          const tempFilename = `/tmp/abuseipdb_blacklist_${Date.now()}.json`;
+          
+          // Fetch the blacklist using node-fetch (from the bot instead of inside the container)
+          console.log('Fetching AbuseIPDB blacklist...');
+          
+          // Use node's built-in https module instead of curl
+          const https = require('https');
+          
+          // Create a promise-based request function
+          const fetchBlacklist = () => {
+            return new Promise((resolve, reject) => {
+              const options = {
+                hostname: 'api.abuseipdb.com',
+                path: `/api/v2/blacklist?confidenceMinimum=${confidenceMinimum}`,
+                method: 'GET',
+                headers: {
+                  'Key': apiKey,
+                  'Accept': 'application/json'
+                }
+              };
+              
+              const req = https.request(options, (res) => {
+                let data = '';
+                
+                // A chunk of data has been received
+                res.on('data', (chunk) => {
+                  data += chunk;
+                });
+                
+                // The whole response has been received
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try {
+                      resolve(JSON.parse(data));
+                    } catch (error) {
+                      reject(new Error(`Failed to parse API response: ${error.message}`));
+                    }
+                  } else {
+                    reject(new Error(`API request failed with status code ${res.statusCode}: ${data}`));
+                  }
+                });
+              });
+              
+              // Handle request errors
+              req.on('error', (error) => {
+                reject(new Error(`API request failed: ${error.message}`));
+              });
+              
+              // End the request
+              req.end();
+            });
+          };
+          
+          // Fetch the blacklist
+          let responseData;
+          try {
+            responseData = await fetchBlacklist();
+            console.log(`Successfully fetched blacklist from AbuseIPDB (total IPs: ${responseData.data?.length || 0})`);
+          } catch (error) {
+            console.error('Error fetching blacklist:', error);
+            throw new Error(`Failed to fetch blacklist: ${error.message}`);
+          }
+          
+          if (!responseData.data || !Array.isArray(responseData.data)) {
+            throw new Error('Invalid response from AbuseIPDB. Expected array of IP data.');
+          }
+          
+          console.log(`Found ${responseData.data.length} IPs in blacklist`);
+          
+          // Create decisions JSON
+          const crowdsecDecisions = responseData.data
+            .map(({ ipAddress }) => ({
+              duration: banDuration,
+              reason: 'abuseipdb blacklist',
+              scope: 'ip',
+              type: 'ban',
+              value: ipAddress,
+            }));
+          
+          if (crowdsecDecisions.length === 0) {
+            embed.setColor(branding.colors.warning);
+            embed.setDescription(`${branding.emojis.warning} No IPs found in AbuseIPDB blacklist with confidence ≥ ${confidenceMinimum}.`);
+            await interaction.editReply({ embeds: [embed] });
+            return;
+          }
+          
+          // Update embed with count
+          embed.setDescription(`${branding.emojis.loading} Found ${crowdsecDecisions.length} IPs in AbuseIPDB blacklist. Importing to CrowdSec...`);
+          await interaction.editReply({ embeds: [embed] }).catch(error => {
+            console.error('Error updating embed:', error);
+          });
+          
+          // Create a JSON file inside the container using echo and Write the decisions using the Docker API
+          const crowdsecDecisionsJson = JSON.stringify(crowdsecDecisions);
+          
+          console.log('Writing decisions to container file...');
+          
+          // Split the large JSON into smaller chunks if needed to avoid command line length limits
+          // Maximum number of IPs to process in each batch
+          const BATCH_SIZE = 1000;
+          const totalBatches = Math.ceil(crowdsecDecisions.length / BATCH_SIZE);
+          
+          console.log(`Processing ${crowdsecDecisions.length} IPs in ${totalBatches} batches of ${BATCH_SIZE}`);
+          
+          // Process in batches
+          for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+            const start = batchIndex * BATCH_SIZE;
+            const end = Math.min(start + BATCH_SIZE, crowdsecDecisions.length);
+            // Fix duration format to include 'h' if not already present
+            const batchDecisions = crowdsecDecisions.slice(start, end).map(decision => {
+              // Make sure duration has 'h' suffix if it's just a number
+              if (decision.duration && !isNaN(decision.duration) && !decision.duration.endsWith('h')) {
+                decision.duration = `${decision.duration}h`;
+              }
+              return decision;
+            });
+            
+            // Create a temporary batch filename with batch number
+            const batchFilename = `/tmp/abuseipdb_batch_${batchIndex+1}_of_${totalBatches}.json`;
+            
+            // Create batch JSON
+            const batchJson = JSON.stringify(batchDecisions);
+            
+            console.log(`Writing batch ${batchIndex+1}/${totalBatches} with ${batchDecisions.length} IPs`);
+            
+            // Use echo to write the file (more reliable for smaller files)
+            // Escape double quotes in the JSON string for the shell command
+            const escapedJson = batchJson.replace(/"/g, '\\"');
+            const writeCmd = [
+              'bash', '-c', `echo "${escapedJson}" > ${batchFilename}`
+            ];
+            
+            const writeResult = await dockerManager.executeInContainer('crowdsec', writeCmd);
+            
+            if (!writeResult.success) {
+              throw new Error(`Failed to write decisions batch file: ${writeResult.error || "Unknown error"}`);
+            }
+            
+            // Import this batch immediately
+            console.log(`Importing batch ${batchIndex+1}/${totalBatches}...`);
+            const importCmd = ['cscli', 'decisions', 'import', '-i', batchFilename];
+            
+            const importResult = await dockerManager.executeInContainer('crowdsec', importCmd);
+            
+            // CrowdSec outputs informational messages to stderr which aren't actually errors
+            // Success messages look like: level=info msg="Imported X decisions"
+            let isActualError = false;
+            if (!importResult.success) {
+              // Check if this is actually an informational message about successfully importing
+              if (importResult.stderr && importResult.stderr.includes('level=info') && 
+                  (importResult.stderr.includes('Imported') || importResult.stderr.includes('Parsing'))) {
+                // This is actually a success message, not an error
+                console.log(`Successfully imported batch ${batchIndex+1}/${totalBatches} (from stderr info messages)`);
+                isActualError = false;
+              } else {
+                isActualError = true;
+              }
+            }
+            
+            if (isActualError) {
+              throw new Error(`Failed to import decisions batch ${batchIndex+1}/${totalBatches}: ${importResult.error || "Unknown error"}`);
+            }
+            
+            // Clean up this batch file
+            const cleanupCmd = ['rm', batchFilename];
+            await dockerManager.executeInContainer('crowdsec', cleanupCmd).catch(error => {
+              console.error(`Error cleaning up batch file ${batchFilename}:`, error);
+              // Continue despite cleanup errors
+            });
+            
+            console.log(`Successfully imported batch ${batchIndex+1}/${totalBatches}`);
+          }
+          
+          // Note: Import is now handled in the batch processing loop above
+          
+                    // Update embed with success message
+          embed.setColor(branding.colors.success);
+          embed.setDescription(`${branding.emojis.healthy} Successfully imported ${crowdsecDecisions.length} IPs from AbuseIPDB blacklist to CrowdSec.`);
+          
+          // Add details
+          embed.addFields(
+            { name: 'Blacklisted IPs', value: `${crowdsecDecisions.length} IPs with confidence ≥ ${confidenceMinimum}`, inline: true },
+            { name: 'Ban Duration', value: banDuration, inline: true },
+            { name: 'Reason', value: 'abuseipdb blacklist', inline: true }
+          );
+          
+          // Add sample of blacklisted IPs (first 10)
+          if (crowdsecDecisions.length > 0) {
+            const sampleIPs = crowdsecDecisions.slice(0, 10).map(d => d.value).join('\n');
+            const additionalMessage = crowdsecDecisions.length > 10 ? 
+              `\n... and ${crowdsecDecisions.length - 10} more` : '';
+            
+            embed.addFields({
+              name: 'Sample of Blacklisted IPs',
+              value: sampleIPs + additionalMessage
+            });
+          }
+          
+          // Add processing information
+          embed.addFields({
+            name: 'Processing Details',
+            value: `Processed in ${totalBatches} batch(es) of ${BATCH_SIZE} IPs each`
+          });
+          
+          await interaction.editReply({ embeds: [embed] });
+          
+        } catch (error) {
+          console.error('Error importing blacklist:', error);
+          
+          // Create error embed with branding
+          const errorEmbed = branding.getHeaderEmbed('Error Importing Blacklist', 'danger');
+          errorEmbed.setDescription(`${branding.emojis.error} An error occurred while importing the blacklist:\n\`\`\`${error.message}\`\`\``);
+          
+          await interaction.editReply({ embeds: [errorEmbed] });
+        }
       } else {
         throw new Error(`Unknown subcommand: ${subcommand}`);
       }

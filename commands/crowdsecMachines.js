@@ -147,7 +147,7 @@ module.exports = {
         const auto = interaction.options.getBoolean('auto');
         
         // Build command
-        const cmd = ['cscli', 'machines', 'add', name];
+        const cmd = ['cscli', 'machines', 'add', name, '-f-'];
         
         if (auto || !password) {
           cmd.push('--auto');

@@ -1,6 +1,6 @@
 {
   "name": "pangolin-discord-bot",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Discord bot to remotely monitor and control your pangolin stack on a vps server",
   "main": "index.js",
   "scripts": {
