@@ -1,2 +1,5 @@
 node_modules
+.idx
 .env
+docker-compose.yml
+.dockerignore
